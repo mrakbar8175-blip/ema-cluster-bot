@@ -1,0 +1,22 @@
+name: Forex Swing Signal (4H)
+
+on:
+  schedule:
+    - cron: '0 */4 * * 1-5'          # every 4 hours, Monday to Friday
+  workflow_dispatch:
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - run: pip install requests pandas numpy yfinance
+      - name: Run forex bot
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: python forex_ai.py
