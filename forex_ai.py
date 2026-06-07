@@ -29,6 +29,11 @@ FX_PAIRS = [
     "USDZAR", "USDRUB", "USDTRY", "USDINR", "USDBRL"
 ]
 
+# ========== CSV FILE PATHS ==========
+TRADE_LOG_CSV   = "forex_trade_log.csv"
+OPEN_TRADES_CSV = "forex_open_trades.csv"
+TRADE_RESULTS_CSV = "forex_trade_results.csv"
+
 # ========== DATA HELPERS ==========
 def get_yahoo_forex_klines(pair, interval='4h', days=60):
     symbol = pair + "=X"
@@ -43,6 +48,132 @@ def get_yahoo_forex_klines(pair, interval='4h', days=60):
         return df
     except:
         return pd.DataFrame()
+
+# ========== CSV LOGGING FUNCTIONS ==========
+def init_csv(filepath, columns):
+    if not os.path.exists(filepath):
+        df = pd.DataFrame(columns=columns)
+        df.to_csv(filepath, index=False)
+
+def append_csv(filepath, df_new):
+    try:
+        existing = pd.read_csv(filepath)
+        updated = pd.concat([existing, df_new], ignore_index=True)
+    except (FileNotFoundError, pd.errors.EmptyDataError):
+        updated = df_new
+    updated.to_csv(filepath, index=False)
+
+def save_csv(filepath, df):
+    df.to_csv(filepath, index=False)
+
+def initialize_trade_files():
+    init_csv(TRADE_LOG_CSV, ["timestamp", "pair", "action", "entry", "stop",
+                             "TP1", "TP2", "TP3", "TP4", "TP5", "conviction", "ai_confidence"])
+    init_csv(OPEN_TRADES_CSV, ["timestamp", "pair", "action", "entry", "stop",
+                               "TP1", "TP2", "TP3", "TP4", "TP5", "status"])
+    init_csv(TRADE_RESULTS_CSV, ["timestamp", "pair", "action", "entry", "stop",
+                                 "TP1", "TP2", "TP3", "TP4", "TP5", "status", "hit_level", "close_time"])
+
+def log_signal(signal):
+    row = {
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "pair": signal["pair"],
+        "action": signal["action"],
+        "entry": signal["limit_price"],
+        "stop": signal["stop_loss"],
+        "TP1": signal["take_profits"][0],
+        "TP2": signal["take_profits"][1],
+        "TP3": signal["take_profits"][2],
+        "TP4": signal["take_profits"][3],
+        "TP5": signal["take_profits"][4],
+        "conviction": signal["conviction_score"],
+        "ai_confidence": signal["confidence_score"],
+    }
+    df = pd.DataFrame([row])
+    append_csv(TRADE_LOG_CSV, df)
+
+def add_open_trade(signal):
+    row = {
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "pair": signal["pair"],
+        "action": signal["action"],
+        "entry": signal["limit_price"],
+        "stop": signal["stop_loss"],
+        "TP1": signal["take_profits"][0],
+        "TP2": signal["take_profits"][1],
+        "TP3": signal["take_profits"][2],
+        "TP4": signal["take_profits"][3],
+        "TP5": signal["take_profits"][4],
+        "status": "open"
+    }
+    df = pd.DataFrame([row])
+    append_csv(OPEN_TRADES_CSV, df)
+
+def check_open_trades(current_prices):
+    """
+    Check all open forex trades against current prices.
+    If stop or TP is hit, move trade to results and remove from open trades.
+    """
+    try:
+        open_df = pd.read_csv(OPEN_TRADES_CSV)
+    except (FileNotFoundError, pd.errors.EmptyDataError):
+        return
+
+    results = []
+    still_open = []
+    for _, trade in open_df.iterrows():
+        pair = trade["pair"]
+        if pair not in current_prices:
+            still_open.append(trade)
+            continue
+        price = current_prices[pair]
+        direction = trade["action"]
+        entry = trade["entry"]
+        stop = trade["stop"]
+        tps = [trade[f"TP{i}"] for i in range(1,6)]
+
+        hit = None
+        if direction == "LONG":
+            if price <= stop:
+                hit = "STOP LOSS"
+            else:
+                for i, tp in enumerate(tps, 1):
+                    if price >= tp:
+                        hit = f"TP{i}"
+                        break
+        else:  # SHORT
+            if price >= stop:
+                hit = "STOP LOSS"
+            else:
+                for i, tp in enumerate(tps, 1):
+                    if price <= tp:
+                        hit = f"TP{i}"
+                        break
+        if hit:
+            result = trade.to_dict()
+            result["hit_level"] = hit
+            result["close_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            results.append(result)
+        else:
+            still_open.append(trade)
+
+    if results:
+        df_results = pd.DataFrame(results)
+        append_csv(TRADE_RESULTS_CSV, df_results)
+    if still_open:
+        df_still_open = pd.DataFrame(still_open)
+        save_csv(OPEN_TRADES_CSV, df_still_open)
+    else:
+        save_csv(OPEN_TRADES_CSV, pd.DataFrame())
+
+def fetch_current_prices():
+    """Fetch latest close price for all pairs in the universe (quick snapshot)."""
+    prices = {}
+    for pair in FX_PAIRS:
+        df = get_yahoo_forex_klines(pair, interval='4h', days=2)
+        if not df.empty and len(df) >= 1:
+            prices[pair] = df['Close'].iloc[-1]
+    return prices
 
 # ========== LAYER 1: TECHNICALS (4h, structure‑heavy, no MACD) – weight 20% ==========
 def get_technicals(pair):
@@ -490,9 +621,23 @@ def send_telegram(text):
 
 def main():
     try:
+        # Initialize CSV files
+        initialize_trade_files()
+
+        # Check open trades and update results
+        print("Checking open forex trades...")
+        current_prices = fetch_current_prices()
+        check_open_trades(current_prices)
+
+        # Generate new signal
         dec = generate_signal()
         action = dec.get('action', 'HOLD')
         if action in ["LONG", "SHORT"]:
+            # Log and add to open trades
+            log_signal(dec)
+            add_open_trade(dec)
+
+            # Send Telegram signal
             pair = dec.get('pair', '')
             direction_icon = "🟢" if action == "LONG" else "🔴"
             entry_price = dec.get('limit_price', 0)
@@ -520,6 +665,7 @@ def main():
         else:
             msg = f"📊 HOLD\n{dec.get('reasoning', 'No signal')}"
             send_telegram(msg)
+
     except Exception as e:
         err_msg = f"Bot crashed: {traceback.format_exc()}"
         print(err_msg)
