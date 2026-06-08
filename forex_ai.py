@@ -66,7 +66,8 @@ OPEN_TRADES_CSV = "multi_open_trades.csv"
 TRADE_RESULTS_CSV = "multi_trade_results.csv"
 
 # ========== DATA HELPERS ==========
-def get_yahoo_klines(ticker, interval='4h', days=60):
+def get_yahoo_klines(ticker, interval='1h', days=14):
+    """Fetch 1h candles. Use 14 days to ensure enough data for the indicators."""
     end = datetime.now()
     start = end - timedelta(days=days)
     try:
@@ -79,7 +80,7 @@ def get_yahoo_klines(ticker, interval='4h', days=60):
     except:
         return pd.DataFrame()
 
-# ========== CSV LOGGING (unchanged) ==========
+# ========== CSV LOGGING ==========
 def init_csv(filepath, columns):
     if not os.path.exists(filepath):
         df = pd.DataFrame(columns=columns)
@@ -196,19 +197,20 @@ def check_open_trades(current_prices):
         return None
 
 def fetch_current_prices():
+    """Get the most recent 1h close for every instrument – this is your 'live' price."""
     prices = {}
     for instr in INSTRUMENTS:
-        df = get_yahoo_klines(instr["ticker"], interval='4h', days=2)
+        df = get_yahoo_klines(instr["ticker"], interval='1h', days=1)
         if not df.empty and len(df) >= 1:
             prices[instr["pair"]] = df['Close'].iloc[-1]
     return prices
 
-# ========== LAYERS & SCORING (unchanged) ==========
+# ========== LAYERS (1‑hour, fixed buying pressure) ==========
 def get_technicals(ticker):
-    df = get_yahoo_klines(ticker, interval='4h', days=14)
+    df = get_yahoo_klines(ticker, interval='1h', days=14)
     error = None
     if df.empty or len(df) < 50:
-        error = f"insufficient 4h data ({len(df)} candles)"
+        error = f"insufficient 1h data ({len(df)} candles)"
         return {
             "trend": 0, "adx": 0, "structure": 0,
             "combined": 0, "ema50_distance": 1.0, "error": error
@@ -318,8 +320,8 @@ def get_technicals(ticker):
         "adx_value": adx_now, "error": None
     }
 
-def get_4h_atr(ticker, current_price):
-    df = get_yahoo_klines(ticker, interval='4h', days=14)
+def get_1h_atr(ticker, current_price):
+    df = get_yahoo_klines(ticker, interval='1h', days=7)
     if df.empty or len(df) < 14:
         return current_price * 0.002, "ATR data insufficient, using 0.2% fallback"
     high, low, close = df['High'], df['Low'], df['Close']
@@ -330,34 +332,40 @@ def get_4h_atr(ticker, current_price):
     return atr, None
 
 def get_buying_pressure(ticker):
-    df = get_yahoo_klines(ticker, interval='4h', days=10)
-    if df.empty or len(df) < 48:
-        return 0.0, f"insufficient volume data ({len(df)} candles)"
-    df = df.tail(48)
+    # Lower minimum requirement so weekend/partial data never gives 0
+    df = get_yahoo_klines(ticker, interval='1h', days=7)
+    min_candles = 24   # only need 24 hours of data
+    if df.empty or len(df) < min_candles:
+        return 0.0, f"insufficient data ({len(df)} candles)"
+
+    lookback = min(72, len(df))   # up to 3 days
+    df = df.tail(lookback)
+
     if 'Volume' in df.columns and df['Volume'].sum() > 0:
         buy_vol = df.loc[df['Close'] > df['Open'], 'Volume'].sum()
         sell_vol = df.loc[df['Close'] <= df['Open'], 'Volume'].sum()
         total = buy_vol + sell_vol
         if total == 0:
-            return 0.0
-        return (buy_vol - sell_vol) / total
+            return 0.0, "zero total volume"
+        return (buy_vol - sell_vol) / total, None
     else:
+        # Use price‑change based proxy when volume data is missing
         up_bars = df['Close'].pct_change().clip(lower=0).sum()
         down_bars = -df['Close'].pct_change().clip(upper=0).sum()
         total = up_bars + down_bars
         if total == 0:
-            return 0.0
-        return (up_bars - down_bars) / total
+            return 0.0, "no directional movement"
+        return (up_bars - down_bars) / total, None
 
 def get_volatility_score(ticker, current_price):
-    atr, atr_err = get_4h_atr(ticker, current_price)
+    atr, atr_err = get_1h_atr(ticker, current_price)
     atr_pct = atr / current_price * 100
-    if atr_pct < 0.2 or atr_pct > 2.0:
+    if atr_pct < 0.1 or atr_pct > 1.5:   # tighter for 1h forex
         return -1, atr_err
     return 1, None
 
 def dxy_trend_score():
-    df = get_yahoo_klines("DX-Y.NYB", interval='4h', days=14)
+    df = get_yahoo_klines("DX-Y.NYB", interval='1h', days=7)
     if df.empty or len(df) < 50:
         return 0, "DXY data unavailable"
     closes = df['Close']
@@ -369,7 +377,7 @@ def dxy_trend_score():
         return -2, None
 
 def volume_trend_score(ticker):
-    df = get_yahoo_klines(ticker, interval='4h', days=5)
+    df = get_yahoo_klines(ticker, interval='1h', days=2)
     if df.empty or len(df) < 12:
         return 0, "volume data insufficient"
     if 'Volume' in df.columns and df['Volume'].sum() > 0:
@@ -392,7 +400,7 @@ def volume_trend_score(ticker):
         return 0, None
 
 def momentum_alignment_score(ticker, direction):
-    df = get_yahoo_klines(ticker, interval='4h', days=2)
+    df = get_yahoo_klines(ticker, interval='1h', days=1)
     if df.empty or len(df) < 2:
         return 0.0
     last = df.iloc[-1]
@@ -462,7 +470,7 @@ def call_groq_reasoning(pair, entry, atr, layers, errors=None):
     alignment_strength = max(bearish_count, bullish_count)
 
     prompt = (
-        f"Trade signal for {pair} at {entry:.5f}. 4h ATR: {atr:.5f}. "
+        f"Trade signal for {pair} at {entry:.5f}. 1h ATR: {atr:.5f}. "
         f"Layer scores: {layer_str}{err_str}. "
         f"All {alignment_strength} out of 4 directional layers are strongly aligned (bearish/bullish). "
         "Provide a concise, punchy reasoning (max 2 sentences) capturing why this trade sets up well. "
@@ -493,9 +501,8 @@ def call_groq_reasoning(pair, entry, atr, layers, errors=None):
         pass
     return 5, "Multi-factor model (AI unavailable)."
 
-# ========== SIGNAL GENERATION (skips open trades) ==========
+# ========== SIGNAL GENERATION (strict threshold, skips open trades) ==========
 def generate_signal():
-    # Get currently open trades
     open_pairs = set()
     try:
         open_df = pd.read_csv(OPEN_TRADES_CSV)
@@ -508,10 +515,10 @@ def generate_signal():
     for instr in INSTRUMENTS:
         if instr["pair"] in open_pairs:
             continue
-        df = get_yahoo_klines(instr["ticker"], interval='4h', days=2)
+        df = get_yahoo_klines(instr["ticker"], interval='1h', days=2)
         if df.empty or len(df) < 2:
             continue
-        price = df['Close'].iloc[-1]
+        price = df['Close'].iloc[-1]          # <-- LIVE entry (last completed 1h close)
         if price > 0:
             candidates.append({"instr": instr, "price": price})
 
@@ -538,8 +545,8 @@ def generate_signal():
         total_score, layers, ema_dist, adx_val, errors = score_instrument(
             instr, price, dxy_score, dxy_error
         )
-        atr, _ = get_4h_atr(instr["ticker"], price)
-        if atr / price > 0.02:
+        atr, _ = get_1h_atr(instr["ticker"], price)
+        if atr / price > 0.02:   # 2% ATR cap for forex/commodities on 1h
             total_score = 0.0
             errors.append("volatility cap triggered (ATR>2%)")
         item["score"] = total_score
@@ -568,6 +575,7 @@ def generate_signal():
         pair_summary_list.append(f"{c['instr']['pair']}: {c['score']:.2f}")
     pair_summary = " | ".join(pair_summary_list)
 
+    # Strict conviction threshold (1.5)
     if best is None or abs(best_score) < 1.49:
         best_pair = best["instr"]["pair"] if best else "none"
         layer_str = "; ".join([f"{k}={v:.2f}" for k,v in best_layers.items()])
@@ -660,7 +668,6 @@ def main():
         open_trades_df = check_open_trades(current_prices)
 
         if open_trades_df is not None and not open_trades_df.empty:
-            # Send a summary of each open trade
             for _, t in open_trades_df.iterrows():
                 pair = t["pair"]
                 entry = float(t["entry"])
