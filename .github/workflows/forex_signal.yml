@@ -1,4 +1,4 @@
-name: Forex Swing Signal (Manual) with Trade Tracker
+name: Multi-Asset Swing Signal (Manual) with Trade Tracker
 
 on:
   workflow_dispatch:                # manual trigger only
@@ -14,7 +14,7 @@ jobs:
         with:
           python-version: '3.10'
       - run: pip install requests pandas numpy yfinance
-      - name: Run forex bot
+      - name: Run multi‑asset bot
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
@@ -25,6 +25,6 @@ jobs:
           git config --global user.email "actions@github.com"
           git config --global user.name "GitHub Actions"
           git add .
-          git commit -m "Update forex trade logs" || echo "No changes to commit"
+          git commit -m "Update multi-asset trade logs" || echo "No changes to commit"
           git pull --rebase --autostash origin main
           git push
