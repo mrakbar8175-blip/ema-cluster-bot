@@ -19,7 +19,7 @@ portfolio = {
     "daily_loss_limit": -20
 }
 
-# ========== FOREX UNIVERSE (major and cross pairs) ==========
+# ========== FOREX UNIVERSE ==========
 FX_PAIRS = [
     "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "NZDUSD",
     "USDCAD", "USDCHF", "EURGBP", "EURJPY", "GBPJPY",
@@ -110,10 +110,6 @@ def add_open_trade(signal):
     append_csv(OPEN_TRADES_CSV, df)
 
 def check_open_trades(current_prices):
-    """
-    Check all open forex trades against current prices.
-    If stop or TP is hit, move trade to results and remove from open trades.
-    """
     try:
         open_df = pd.read_csv(OPEN_TRADES_CSV)
     except (FileNotFoundError, pd.errors.EmptyDataError):
@@ -167,7 +163,6 @@ def check_open_trades(current_prices):
         save_csv(OPEN_TRADES_CSV, pd.DataFrame())
 
 def fetch_current_prices():
-    """Fetch latest close price for all pairs in the universe (quick snapshot)."""
     prices = {}
     for pair in FX_PAIRS:
         df = get_yahoo_forex_klines(pair, interval='4h', days=2)
@@ -477,10 +472,21 @@ def call_groq_reasoning(pair, entry, atr, layers, errors=None):
         pass
     return 5, "Multi-factor model (AI unavailable)."
 
-# ========== MAIN SIGNAL GENERATION ==========
+# ========== MAIN SIGNAL GENERATION (now skips open trades) ==========
 def generate_signal():
+    # Load open trades to know which pairs are already in a trade
+    open_pairs = set()
+    try:
+        open_df = pd.read_csv(OPEN_TRADES_CSV)
+        if not open_df.empty:
+            open_pairs = set(open_df["pair"].values)
+    except (FileNotFoundError, pd.errors.EmptyDataError):
+        pass
+
     pairs_with_price = []
     for pair in FX_PAIRS:
+        if pair in open_pairs:          # skip pairs with an open trade
+            continue
         df = get_yahoo_forex_klines(pair, interval='4h', days=2)
         if df.empty or len(df) < 2:
             continue
@@ -488,7 +494,7 @@ def generate_signal():
         if price > 0:
             pairs_with_price.append({"pair": pair, "price": price})
     if not pairs_with_price:
-        return {"action": "HOLD", "reasoning": "No valid forex data."}
+        return {"action": "HOLD", "reasoning": "No valid forex data (all pairs with open trades skipped)."}
 
     dxy_score, dxy_error = dxy_trend_score()
 
@@ -621,23 +627,16 @@ def send_telegram(text):
 
 def main():
     try:
-        # Initialize CSV files
         initialize_trade_files()
-
-        # Check open trades and update results
         print("Checking open forex trades...")
         current_prices = fetch_current_prices()
         check_open_trades(current_prices)
 
-        # Generate new signal
         dec = generate_signal()
         action = dec.get('action', 'HOLD')
         if action in ["LONG", "SHORT"]:
-            # Log and add to open trades
             log_signal(dec)
             add_open_trade(dec)
-
-            # Send Telegram signal
             pair = dec.get('pair', '')
             direction_icon = "🟢" if action == "LONG" else "🔴"
             entry_price = dec.get('limit_price', 0)
@@ -665,7 +664,6 @@ def main():
         else:
             msg = f"📊 HOLD\n{dec.get('reasoning', 'No signal')}"
             send_telegram(msg)
-
     except Exception as e:
         err_msg = f"Bot crashed: {traceback.format_exc()}"
         print(err_msg)
