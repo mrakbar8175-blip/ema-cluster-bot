@@ -1,9 +1,7 @@
-name: Forex Swing Signal (4H) with Trade Tracker
+name: Forex Swing Signal (Manual) with Trade Tracker
 
 on:
-  schedule:
-    - cron: '0 */4 * * 1-5'          # every 4 hours, Monday to Friday
-  workflow_dispatch:
+  workflow_dispatch:                # manual trigger only
 
 jobs:
   run-bot:
@@ -11,7 +9,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          persist-credentials: true   # allow pushing changes
+          persist-credentials: true
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
@@ -28,4 +26,5 @@ jobs:
           git config --global user.name "GitHub Actions"
           git add .
           git commit -m "Update forex trade logs" || echo "No changes to commit"
+          git pull --rebase --autostash origin main
           git push
