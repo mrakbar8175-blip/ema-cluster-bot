@@ -19,28 +19,58 @@ portfolio = {
     "daily_loss_limit": -20
 }
 
-# ========== FOREX UNIVERSE ==========
-FX_PAIRS = [
-    "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "NZDUSD",
-    "USDCAD", "USDCHF", "EURGBP", "EURJPY", "GBPJPY",
-    "AUDJPY", "NZDJPY", "EURAUD", "GBPAUD", "EURCHF",
-    "GBPCHF", "AUDCAD", "NZDCAD", "CADJPY", "CHFJPY",
-    "USDSEK", "USDSGD", "USDNOK", "USDHKD", "USDMXN",
-    "USDZAR", "USDRUB", "USDTRY", "USDINR", "USDBRL"
+# ========== UNIVERSE (Forex + Commodities + Indices) ==========
+INSTRUMENTS = [
+    # Forex Majors & Crosses
+    {"pair": "EURUSD",   "ticker": "EURUSD=X"},
+    {"pair": "GBPUSD",   "ticker": "GBPUSD=X"},
+    {"pair": "USDJPY",   "ticker": "USDJPY=X"},
+    {"pair": "AUDUSD",   "ticker": "AUDUSD=X"},
+    {"pair": "NZDUSD",   "ticker": "NZDUSD=X"},
+    {"pair": "USDCAD",   "ticker": "USDCAD=X"},
+    {"pair": "USDCHF",   "ticker": "USDCHF=X"},
+    {"pair": "EURGBP",   "ticker": "EURGBP=X"},
+    {"pair": "EURJPY",   "ticker": "EURJPY=X"},
+    {"pair": "GBPJPY",   "ticker": "GBPJPY=X"},
+    {"pair": "AUDJPY",   "ticker": "AUDJPY=X"},
+    {"pair": "NZDJPY",   "ticker": "NZDJPY=X"},
+    {"pair": "EURAUD",   "ticker": "EURAUD=X"},
+    {"pair": "GBPAUD",   "ticker": "GBPAUD=X"},
+    {"pair": "EURCHF",   "ticker": "EURCHF=X"},
+    {"pair": "GBPCHF",   "ticker": "GBPCHF=X"},
+    {"pair": "AUDCAD",   "ticker": "AUDCAD=X"},
+    {"pair": "NZDCAD",   "ticker": "NZDCAD=X"},
+    {"pair": "CADJPY",   "ticker": "CADJPY=X"},
+    {"pair": "CHFJPY",   "ticker": "CHFJPY=X"},
+    # Additional forex
+    {"pair": "USDSEK",   "ticker": "USDSEK=X"},
+    {"pair": "USDSGD",   "ticker": "USDSGD=X"},
+    {"pair": "USDNOK",   "ticker": "USDNOK=X"},
+    {"pair": "USDHKD",   "ticker": "USDHKD=X"},
+    {"pair": "USDMXN",   "ticker": "USDMXN=X"},
+    {"pair": "USDZAR",   "ticker": "USDZAR=X"},
+    {"pair": "USDTRY",   "ticker": "USDTRY=X"},
+    # Commodities (futures)
+    {"pair": "XAUUSD",   "ticker": "GC=F"},       # Gold
+    {"pair": "XAGUSD",   "ticker": "SI=F"},       # Silver
+    {"pair": "USOIL",    "ticker": "CL=F"},       # Crude Oil
+    # Stock Indices (futures)
+    {"pair": "SPX500",   "ticker": "ES=F"},       # S&P 500
+    {"pair": "NAS100",   "ticker": "NQ=F"},       # Nasdaq 100
+    {"pair": "US30",     "ticker": "YM=F"},       # Dow Jones
 ]
 
-# ========== CSV FILE PATHS ==========
-TRADE_LOG_CSV   = "forex_trade_log.csv"
-OPEN_TRADES_CSV = "forex_open_trades.csv"
-TRADE_RESULTS_CSV = "forex_trade_results.csv"
+# ========== CSV FILES ==========
+TRADE_LOG_CSV   = "multi_trade_log.csv"
+OPEN_TRADES_CSV = "multi_open_trades.csv"
+TRADE_RESULTS_CSV = "multi_trade_results.csv"
 
 # ========== DATA HELPERS ==========
-def get_yahoo_forex_klines(pair, interval='4h', days=60):
-    symbol = pair + "=X"
+def get_yahoo_klines(ticker, interval='4h', days=60):
     end = datetime.now()
     start = end - timedelta(days=days)
     try:
-        df = yf.download(symbol, start=start, end=end, interval=interval, progress=False)
+        df = yf.download(ticker, start=start, end=end, interval=interval, progress=False)
         if df.empty:
             return pd.DataFrame()
         if isinstance(df.columns, pd.MultiIndex):
@@ -49,7 +79,7 @@ def get_yahoo_forex_klines(pair, interval='4h', days=60):
     except:
         return pd.DataFrame()
 
-# ========== CSV LOGGING FUNCTIONS ==========
+# ========== CSV LOGGING (unchanged) ==========
 def init_csv(filepath, columns):
     if not os.path.exists(filepath):
         df = pd.DataFrame(columns=columns)
@@ -113,7 +143,7 @@ def check_open_trades(current_prices):
     try:
         open_df = pd.read_csv(OPEN_TRADES_CSV)
     except (FileNotFoundError, pd.errors.EmptyDataError):
-        return
+        return None
 
     results = []
     still_open = []
@@ -156,23 +186,26 @@ def check_open_trades(current_prices):
     if results:
         df_results = pd.DataFrame(results)
         append_csv(TRADE_RESULTS_CSV, df_results)
+
     if still_open:
         df_still_open = pd.DataFrame(still_open)
         save_csv(OPEN_TRADES_CSV, df_still_open)
+        return df_still_open
     else:
         save_csv(OPEN_TRADES_CSV, pd.DataFrame())
+        return None
 
 def fetch_current_prices():
     prices = {}
-    for pair in FX_PAIRS:
-        df = get_yahoo_forex_klines(pair, interval='4h', days=2)
+    for instr in INSTRUMENTS:
+        df = get_yahoo_klines(instr["ticker"], interval='4h', days=2)
         if not df.empty and len(df) >= 1:
-            prices[pair] = df['Close'].iloc[-1]
+            prices[instr["pair"]] = df['Close'].iloc[-1]
     return prices
 
-# ========== LAYER 1: TECHNICALS (4h, structure‑heavy, no MACD) – weight 20% ==========
-def get_technicals(pair):
-    df = get_yahoo_forex_klines(pair, interval='4h', days=14)
+# ========== LAYERS & SCORING (unchanged) ==========
+def get_technicals(ticker):
+    df = get_yahoo_klines(ticker, interval='4h', days=14)
     error = None
     if df.empty or len(df) < 50:
         error = f"insufficient 4h data ({len(df)} candles)"
@@ -185,7 +218,6 @@ def get_technicals(pair):
     highs  = df['High']
     lows   = df['Low']
 
-    # EMA trend
     ema50 = closes.ewm(span=50, adjust=False).mean()
     ema200 = closes.ewm(span=200, adjust=False).mean() if len(closes) >= 200 else ema50
     current = closes.iloc[-1]
@@ -200,7 +232,6 @@ def get_technicals(pair):
         trend -= 1.5
     trend = max(-3, min(3, trend))
 
-    # ADX
     def calc_adx(high, low, close, period=14):
         dm_plus = high.diff()
         dm_minus = -low.diff()
@@ -233,7 +264,6 @@ def get_technicals(pair):
         else:
             adx_score = -1.0
 
-    # PRICE ACTION (structure, window=7 on 4h)
     window = 7
     lookback = min(50, len(highs))
     recent_highs = highs.iloc[-lookback:]
@@ -273,7 +303,6 @@ def get_technicals(pair):
                 structure_score = -2.0
     structure_score = max(-3, min(3, structure_score))
 
-    # Combined (structure‑heavy, no MACD)
     combined = (
         trend * 0.30 +
         adx_score * 0.25 +
@@ -289,8 +318,8 @@ def get_technicals(pair):
         "adx_value": adx_now, "error": None
     }
 
-def get_4h_atr(pair, current_price):
-    df = get_yahoo_forex_klines(pair, interval='4h', days=14)
+def get_4h_atr(ticker, current_price):
+    df = get_yahoo_klines(ticker, interval='4h', days=14)
     if df.empty or len(df) < 14:
         return current_price * 0.002, "ATR data insufficient, using 0.2% fallback"
     high, low, close = df['High'], df['Low'], df['Close']
@@ -300,9 +329,8 @@ def get_4h_atr(pair, current_price):
         return current_price * 0.002, "ATR calculation failed, using 0.2% fallback"
     return atr, None
 
-# ========== LAYER 2: BUYING PRESSURE (4h, 48 candles lookback) – weight 45% ==========
-def get_buying_pressure(pair):
-    df = get_yahoo_forex_klines(pair, interval='4h', days=10)
+def get_buying_pressure(ticker):
+    df = get_yahoo_klines(ticker, interval='4h', days=10)
     if df.empty or len(df) < 48:
         return 0.0, f"insufficient volume data ({len(df)} candles)"
     df = df.tail(48)
@@ -321,30 +349,27 @@ def get_buying_pressure(pair):
             return 0.0
         return (up_bars - down_bars) / total
 
-# ========== LAYER 3: VOLATILITY (4h) – weight 5% ==========
-def get_volatility_score(pair, current_price):
-    atr, atr_err = get_4h_atr(pair, current_price)
+def get_volatility_score(ticker, current_price):
+    atr, atr_err = get_4h_atr(ticker, current_price)
     atr_pct = atr / current_price * 100
     if atr_pct < 0.2 or atr_pct > 2.0:
         return -1, atr_err
     return 1, None
 
-# ========== LAYER 4: INTERMARKET (DXY 4h trend) – weight 25% ==========
 def dxy_trend_score():
-    df = get_yahoo_forex_klines("DX-Y.NYB", interval='4h', days=14)
+    df = get_yahoo_klines("DX-Y.NYB", interval='4h', days=14)
     if df.empty or len(df) < 50:
         return 0, "DXY data unavailable"
     closes = df['Close']
     ema50 = closes.ewm(span=50, adjust=False).mean()
     current = closes.iloc[-1]
     if current > ema50.iloc[-1]:
-        return 2, None   # DXY up = bullish USD
+        return 2, None
     else:
         return -2, None
 
-# ========== LAYER 5: VOLUME TREND (4h, 6 candles) – weight 5% ==========
-def volume_trend_score(pair):
-    df = get_yahoo_forex_klines(pair, interval='4h', days=5)
+def volume_trend_score(ticker):
+    df = get_yahoo_klines(ticker, interval='4h', days=5)
     if df.empty or len(df) < 12:
         return 0, "volume data insufficient"
     if 'Volume' in df.columns and df['Volume'].sum() > 0:
@@ -366,9 +391,8 @@ def volume_trend_score(pair):
             return -2, None
         return 0, None
 
-# ========== MOMENTUM ALIGNMENT (last 4h candle direction) ==========
-def momentum_alignment_score(pair, direction):
-    df = get_yahoo_forex_klines(pair, interval='4h', days=2)
+def momentum_alignment_score(ticker, direction):
+    df = get_yahoo_klines(ticker, interval='4h', days=2)
     if df.empty or len(df) < 2:
         return 0.0
     last = df.iloc[-1]
@@ -378,38 +402,36 @@ def momentum_alignment_score(pair, direction):
         return 0.20
     return 0.0
 
-# ========== TREND STRENGTH BONUS (ADX > 30) ==========
 def trend_strength_bonus(adx_value, base_score):
     if adx_value > 30 and abs(base_score) > 0.5:
         return 0.20 * (1 if base_score > 0 else -1)
     return 0.0
 
-# ========== SCORING ENGINE ==========
-def score_pair(pair, price, dxy_score, dxy_error):
+def score_instrument(instr, price, dxy_score, dxy_error):
     errors = []
-    tech = get_technicals(pair)
+    tech = get_technicals(instr["ticker"])
     if tech.get("error"):
-        errors.append(f"tech({pair}): {tech['error']}")
+        errors.append(f"tech({instr['pair']}): {tech['error']}")
     tech_combined = tech["combined"]
     ema50_distance = tech["ema50_distance"]
     adx_value = tech.get("adx_value", 0)
 
-    buying, buy_err = get_buying_pressure(pair)
+    buying, buy_err = get_buying_pressure(instr["ticker"])
     if buy_err:
-        errors.append(f"buying_press({pair}): {buy_err}")
+        errors.append(f"buying_press({instr['pair']}): {buy_err}")
     buying_score = buying * 3
 
-    vol_score, vol_err = get_volatility_score(pair, price)
+    vol_score, vol_err = get_volatility_score(instr["ticker"], price)
     if vol_err:
-        errors.append(f"volatility({pair}): {vol_err}")
+        errors.append(f"volatility({instr['pair']}): {vol_err}")
 
     intermarket_s = dxy_score
     if dxy_error:
         errors.append(f"intermarket: {dxy_error}")
 
-    vol_trend_s, vt_err = volume_trend_score(pair)
+    vol_trend_s, vt_err = volume_trend_score(instr["ticker"])
     if vt_err:
-        errors.append(f"volume_trend({pair}): {vt_err}")
+        errors.append(f"volume_trend({instr['pair']}): {vt_err}")
 
     total = (
         0.20 * tech_combined +
@@ -428,7 +450,6 @@ def score_pair(pair, price, dxy_score, dxy_error):
     }
     return max(-3, min(3, total)), layers, ema50_distance, adx_value, errors
 
-# ========== AI REASONING (confidence 4‑7) ==========
 def call_groq_reasoning(pair, entry, atr, layers, errors=None):
     layer_str = "; ".join([f"{k}={v:.2f}" for k,v in layers.items()])
     err_str = ""
@@ -472,9 +493,9 @@ def call_groq_reasoning(pair, entry, atr, layers, errors=None):
         pass
     return 5, "Multi-factor model (AI unavailable)."
 
-# ========== MAIN SIGNAL GENERATION (now skips open trades) ==========
+# ========== SIGNAL GENERATION (skips open trades) ==========
 def generate_signal():
-    # Load open trades to know which pairs are already in a trade
+    # Get currently open trades
     open_pairs = set()
     try:
         open_df = pd.read_csv(OPEN_TRADES_CSV)
@@ -483,18 +504,22 @@ def generate_signal():
     except (FileNotFoundError, pd.errors.EmptyDataError):
         pass
 
-    pairs_with_price = []
-    for pair in FX_PAIRS:
-        if pair in open_pairs:          # skip pairs with an open trade
+    candidates = []
+    for instr in INSTRUMENTS:
+        if instr["pair"] in open_pairs:
             continue
-        df = get_yahoo_forex_klines(pair, interval='4h', days=2)
+        df = get_yahoo_klines(instr["ticker"], interval='4h', days=2)
         if df.empty or len(df) < 2:
             continue
         price = df['Close'].iloc[-1]
         if price > 0:
-            pairs_with_price.append({"pair": pair, "price": price})
-    if not pairs_with_price:
-        return {"action": "HOLD", "reasoning": "No valid forex data (all pairs with open trades skipped)."}
+            candidates.append({"instr": instr, "price": price})
+
+    if not candidates:
+        if open_pairs:
+            return {"action": "HOLD", "reasoning": "All instruments with valid data already have open trades."}
+        else:
+            return {"action": "HOLD", "reasoning": "No valid market data (weekend or holiday)."}
 
     dxy_score, dxy_error = dxy_trend_score()
 
@@ -506,14 +531,14 @@ def generate_signal():
     best_adx = 0
     best_errors = []
 
-    for item in pairs_with_price:
-        pair = item["pair"]
+    for item in candidates:
+        instr = item["instr"]
         price = item["price"]
 
-        total_score, layers, ema_dist, adx_val, errors = score_pair(
-            pair, price, dxy_score, dxy_error
+        total_score, layers, ema_dist, adx_val, errors = score_instrument(
+            instr, price, dxy_score, dxy_error
         )
-        atr, _ = get_4h_atr(pair, price)
+        atr, _ = get_4h_atr(instr["ticker"], price)
         if atr / price > 0.02:
             total_score = 0.0
             errors.append("volatility cap triggered (ATR>2%)")
@@ -540,11 +565,11 @@ def generate_signal():
     all_scored_sorted = sorted(all_scored, key=lambda x: abs(x["score"]), reverse=True)
     pair_summary_list = []
     for c in all_scored_sorted:
-        pair_summary_list.append(f"{c['pair']}: {c['score']:.2f}")
+        pair_summary_list.append(f"{c['instr']['pair']}: {c['score']:.2f}")
     pair_summary = " | ".join(pair_summary_list)
 
     if best is None or abs(best_score) < 1.49:
-        best_pair = best["pair"] if best else "none"
+        best_pair = best["instr"]["pair"] if best else "none"
         layer_str = "; ".join([f"{k}={v:.2f}" for k,v in best_layers.items()])
         err_str = ""
         if best_errors:
@@ -552,17 +577,17 @@ def generate_signal():
         display_score = round(best_score, 2)
         reason = (f"No strong conviction. Best score: {display_score:+.2f}/3 for {best_pair}.\n"
                   f"Layers: {layer_str}{err_str}\n"
-                  f"All pairs: {pair_summary}")
+                  f"All instruments: {pair_summary}")
         return {"action": "HOLD", "reasoning": reason}
 
     direction = "LONG" if best_score >= 0 else "SHORT"
 
     best_score += trend_strength_bonus(best_adx, best_score)
-    momentum_bonus = momentum_alignment_score(best["pair"], direction)
+    momentum_bonus = momentum_alignment_score(best["instr"]["ticker"], direction)
     best_score += momentum_bonus
 
     if abs(best_score) < 1.49:
-        best_pair = best["pair"]
+        best_pair = best["instr"]["pair"]
         layer_str = "; ".join([f"{k}={v:.2f}" for k,v in best_layers.items()])
         err_str = ""
         if best_errors:
@@ -570,7 +595,7 @@ def generate_signal():
         display_score = round(best_score, 2)
         reason = (f"No strong conviction after bonuses. Best score: {display_score:+.2f}/3 for {best_pair}.\n"
                   f"Layers: {layer_str}{err_str}\n"
-                  f"All pairs: {pair_summary}")
+                  f"All instruments: {pair_summary}")
         return {"action": "HOLD", "reasoning": reason}
 
     entry = best["price"]
@@ -589,23 +614,23 @@ def generate_signal():
         else:
             tps.append(round(entry - mult * risk, 5))
 
-    conf, reason = call_groq_reasoning(best["pair"], entry, atr, best_layers, best_errors)
+    conf, reason = call_groq_reasoning(best["instr"]["pair"], entry, atr, best_layers, best_errors)
     if conf < 5:
         layer_str = "; ".join([f"{k}={v:.2f}" for k,v in best_layers.items()])
         err_str = ""
         if best_errors:
             err_str = " | Errors: " + "; ".join(best_errors)
         display_score = round(best_score, 2)
-        reason = (f"AI confidence too low ({conf}/10). Best score: {display_score:+.2f}/3 for {best['pair']}.\n"
+        reason = (f"AI confidence too low ({conf}/10). Best score: {display_score:+.2f}/3 for {best['instr']['pair']}.\n"
                   f"Layers: {layer_str}{err_str}\n"
-                  f"All pairs: {pair_summary}\n{reason}")
+                  f"All instruments: {pair_summary}\n{reason}")
         return {"action": "HOLD", "reasoning": reason}
 
     conviction_display = round(best_score, 2)
 
     return {
         "action": direction,
-        "pair": best["pair"],
+        "pair": best["instr"]["pair"],
         "quantity": qty,
         "limit_price": entry,
         "stop_loss": stop,
@@ -628,10 +653,29 @@ def send_telegram(text):
 def main():
     try:
         initialize_trade_files()
-        print("Checking open forex trades...")
-        current_prices = fetch_current_prices()
-        check_open_trades(current_prices)
 
+        # -------- Check open trades and send status updates --------
+        print("Checking open multi‑asset trades...")
+        current_prices = fetch_current_prices()
+        open_trades_df = check_open_trades(current_prices)
+
+        if open_trades_df is not None and not open_trades_df.empty:
+            # Send a summary of each open trade
+            for _, t in open_trades_df.iterrows():
+                pair = t["pair"]
+                entry = float(t["entry"])
+                stop = float(t["stop"])
+                current = current_prices.get(pair)
+                if current is None:
+                    continue
+                direction = t["action"]
+                pnl = (current - entry) / abs(entry - stop) if direction == "LONG" else (entry - current) / abs(entry - stop)
+                msg = (f"📊 Open Trade: {pair} {direction}\n"
+                       f"Entry: {entry:.5f}  |  Current: {current:.5f}\n"
+                       f"P&L: {pnl:+.2f}R  |  Stop: {stop:.5f}")
+                send_telegram(msg)
+
+        # -------- Generate new signal --------
         dec = generate_signal()
         action = dec.get('action', 'HOLD')
         if action in ["LONG", "SHORT"]:
@@ -662,8 +706,8 @@ def main():
             )
             send_telegram(msg)
         else:
-            msg = f"📊 HOLD\n{dec.get('reasoning', 'No signal')}"
-            send_telegram(msg)
+            send_telegram(f"📊 HOLD\n{dec.get('reasoning', 'No signal')}")
+
     except Exception as e:
         err_msg = f"Bot crashed: {traceback.format_exc()}"
         print(err_msg)
