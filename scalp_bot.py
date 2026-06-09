@@ -387,8 +387,10 @@ def generate_signal():
             cg_map[sym] = {"price": coin["current_price"], "volume": coin.get("total_volume", 0)}
 
     candidates = []
-    for sym in cg_map:
-        candidates.append({"symbol": sym, "price": cg_map[sym]["price"], "volume": cg_map[sym]["volume"]})
+for sym in cg_map:
+    if "QUQ" in sym.upper():          # ← skip QUQ and anything similar
+        continue
+    candidates.append({"symbol": sym, "price": cg_map[sym]["price"], "volume": cg_map[sym]["volume"]})
     candidates.sort(key=lambda x: x["volume"], reverse=True)
     candidates = candidates[:20]
 
