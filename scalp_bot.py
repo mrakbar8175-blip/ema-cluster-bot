@@ -27,13 +27,12 @@ def init_csv():
     cols = [
         "timestamp", "symbol", "action", "entry", "stop",
         "TP1", "TP2", "conviction", "ai_confidence",
-        "outcome", "outcome_time"          # new columns
+        "outcome", "outcome_time"
     ]
     if not os.path.exists(TRADE_LOG_CSV):
         df = pd.DataFrame(columns=cols)
         df.to_csv(TRADE_LOG_CSV, index=False)
     else:
-        # ensure new columns exist (for existing log files)
         df = pd.read_csv(TRADE_LOG_CSV)
         for c in ["outcome", "outcome_time"]:
             if c not in df.columns:
@@ -51,7 +50,7 @@ def log_signal(signal):
         "TP2": signal["take_profits"][1],
         "conviction": signal["conviction_score"],
         "ai_confidence": signal["confidence_score"],
-        "outcome": "",               # empty for now
+        "outcome": "",
         "outcome_time": ""
     }
     df = pd.DataFrame([row])
@@ -404,7 +403,7 @@ def generate_signal():
 
     candidates = []
     for sym in cg_map:
-        if "QUQ" in sym.upper():          # ← exclude QUQ
+        if "QUQ" in sym.upper():
             continue
         candidates.append({"symbol": sym, "price": cg_map[sym]["price"], "volume": cg_map[sym]["volume"]})
     candidates.sort(key=lambda x: x["volume"], reverse=True)
@@ -461,7 +460,8 @@ def generate_signal():
         coin_summary_list.append(f"{c['symbol'].replace('USDT','')}: {c['score']:.2f}")
     coin_summary = " | ".join(coin_summary_list)
 
-    if best is None or abs(best_score) < 0.99:
+    # --- FIRST FILTER: minimum conviction 1.5 ---
+    if best is None or abs(best_score) < 1.5:
         best_sym = best["symbol"] if best else "none"
         layer_str = "; ".join([f"{k}={v:.2f}" for k,v in best_layers.items()])
         err_str = ""
@@ -494,7 +494,8 @@ def generate_signal():
     momentum_bonus = momentum_alignment_score(best["symbol"], direction, best_layers)
     best_score += momentum_bonus
 
-    if abs(best_score) < 0.99:
+    # --- SECOND FILTER: after bonuses still need ≥1.5 ---
+    if abs(best_score) < 1.5:
         best_sym = best["symbol"]
         layer_str = "; ".join([f"{k}={v:.2f}" for k,v in best_layers.items()])
         err_str = ""
@@ -559,7 +560,7 @@ def check_open_trades():
     try:
         existing = pd.read_csv(TRADE_LOG_CSV)
     except:
-        return  # no file yet
+        return
 
     open_trades = existing[existing["outcome"].isna() | (existing["outcome"] == "")]
     if open_trades.empty:
@@ -643,11 +644,7 @@ def send_telegram(text):
 def main():
     try:
         init_csv()
-
-        # --- STEP 1: check existing open trades ---
         check_open_trades()
-
-        # --- STEP 2: generate new signal ---
         dec = generate_signal()
         action = dec.get('action', 'HOLD')
         if action in ["LONG", "SHORT"]:
