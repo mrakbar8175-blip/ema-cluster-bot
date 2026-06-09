@@ -373,7 +373,7 @@ def call_groq_reasoning(symbol, entry, atr, layers, errors=None):
         pass
     return 5, "Multi-factor model (AI unavailable)."
 
-# ========== SIGNAL GENERATION (top 20 coins, positive RR) ==========
+# ========== SIGNAL GENERATION (top 20 coins, positive RR, QUQ excluded) ==========
 def generate_signal():
     cg_url = "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=volume_desc&per_page=50&page=1"
     coins_data = fetch_coingecko(cg_url)
@@ -387,10 +387,10 @@ def generate_signal():
             cg_map[sym] = {"price": coin["current_price"], "volume": coin.get("total_volume", 0)}
 
     candidates = []
-for sym in cg_map:
-    if "QUQ" in sym.upper():          # ← skip QUQ and anything similar
-        continue
-    candidates.append({"symbol": sym, "price": cg_map[sym]["price"], "volume": cg_map[sym]["volume"]})
+    for sym in cg_map:
+        if "QUQ" in sym.upper():          # ← exclude QUQ
+            continue
+        candidates.append({"symbol": sym, "price": cg_map[sym]["price"], "volume": cg_map[sym]["volume"]})
     candidates.sort(key=lambda x: x["volume"], reverse=True)
     candidates = candidates[:20]
 
