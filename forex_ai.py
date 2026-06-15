@@ -146,10 +146,18 @@ def update_portfolio(trade_result):
     save_portfolio(portfolio)
 
 # ========== DATA ==========
-def get_data(pair, interval='4h', days=14):
+def get_data(pair, interval='4h', days=14, start=None, end=None):
+    """
+    Fetch forex data from Yahoo Finance.
+    - Uses days parameter if start not provided.
+    - Accepts explicit start/end for trade monitoring.
+    """
     ysym = f"{pair}=X"
-    end = datetime.now()
-    start = end - timedelta(days=days)
+    if start is None:
+        end = datetime.now()
+        start = end - timedelta(days=days)
+    else:
+        end = end if end else datetime.now()
     try:
         df = yf.download(ysym, start=start, end=end, interval=interval, progress=False)
         if df.empty:
@@ -411,6 +419,7 @@ def check_open_trades():
             still_open.append(trade)
             continue
 
+        # FIXED: get_data now accepts start/end
         df_1h = get_data(sym, interval='1h', start=entry_time, end=now)
         if df_1h.empty:
             still_open.append(trade)
