@@ -1,1 +1,2 @@
-timestamp,symbol,action,entry,stop,TP1,TP2,TP3,TP4,TP5,conviction,ai_confidence
+timestamp,symbol,action,entry,stop,TP1,TP2,TP3,TP4,TP5,conviction,ai_confidence,score
+2026-06-15 14:55:53,EURCAD,LONG,1.6237800121307373,1.606376,1.632482,1.641184,1.649886,,,,,6.5
