@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-High‑Winrate Forex Swing Bot + Chart + Alerts
-Multi‑timeframe confirmation with conviction score.
+High‑Winrate Forex Swing Bot – Tight Stops + Chart + Alerts
+Stop Loss: max(1.0*ATR, 8 pips), capped at 30 pips.
 """
 
 import requests, json, os, traceback
@@ -311,7 +311,7 @@ def score_pair(pair):
 
     return total, direction, price, atr_val, (sup if direction == "LONG" else res)
 
-# ========== SIGNAL GENERATION ==========
+# ========== SIGNAL GENERATION (TIGHT STOPS) ==========
 def generate_signal():
     open_symbols = set()
     try:
@@ -336,11 +336,31 @@ def generate_signal():
     best = candidates[0]
     pair, score, direction, price, atr_val, swing_level = best
 
-    min_stop_dist = 1.5 * atr_val
-    if direction == "LONG":
-        stop = min(price - min_stop_dist, swing_level - 0.1 * atr_val)
+    ps = pip_scale(pair)
+    min_pips = 8
+    max_pips = 30
+    # Base stop = 1.0 * ATR
+    raw_stop_pips = (1.0 * atr_val) / ps
+    # Apply floor and cap
+    if raw_stop_pips < min_pips:
+        stop_distance_pips = min_pips
+    elif raw_stop_pips > max_pips:
+        stop_distance_pips = max_pips
     else:
-        stop = max(price + min_stop_dist, swing_level + 0.1 * atr_val)
+        stop_distance_pips = raw_stop_pips
+
+    stop_distance = stop_distance_pips * ps
+
+    if direction == "LONG":
+        stop = price - stop_distance
+        # Tighten further if swing low gives an even better level
+        if swing_level is not None and swing_level > price - stop_distance * 1.2:
+            stop = min(stop, swing_level - 0.05 * atr_val)
+    else:
+        stop = price + stop_distance
+        if swing_level is not None and swing_level < price + stop_distance * 1.2:
+            stop = max(stop, swing_level + 0.05 * atr_val)
+
     stop = round(stop, 6)
 
     risk_per_share = abs(price - stop)
@@ -516,7 +536,6 @@ def send_trade_chart(signal):
         import matplotlib.pyplot as plt
         import mplfinance as mpf
 
-        # Fetch 21 days of 4h data for enough candles
         df = get_data(sym, interval='4h', days=21)
         if df.empty or len(df) < 20:
             raise ValueError(f"Only {len(df)} 4h candles")
@@ -531,13 +550,11 @@ def send_trade_chart(signal):
                 'axes.titlecolor': 'white'}
         )
 
-        # EMA50 – use available length if less than 50
         ema50 = df['Close'].ewm(span=min(50, len(df)), adjust=False).mean()
         addplots = [
             mpf.make_addplot(ema50, color='#f39c12', width=1.5, label='EMA50')
         ]
 
-        # VWAP only if we have non‑zero total volume
         total_vol = df['Volume'].sum()
         if total_vol > 0:
             typical = (df['High'] + df['Low'] + df['Close']) / 3
@@ -575,13 +592,12 @@ def send_trade_chart(signal):
             if resp.status_code != 200:
                 print(f"Telegram photo send failed: {resp.text}")
         os.remove(chart_path)
-        return  # success
+        return
 
     except Exception as e:
         print(f"Chart image error: {e}")
         send_telegram(f"⚠️ Chart image unavailable ({str(e)[:80]}).")
 
-    # --- Fallback: TradingView link ---
     studies = "&studies[]=STD%3BEMA%3B50&studies[]=STD%3BVWAP"
     tv_url = f"https://www.tradingview.com/chart/?symbol=FX:{sym}&interval=240{studies}"
     send_telegram(f"📈 {sym} 4h chart (EMA50 + VWAP): {tv_url}")
