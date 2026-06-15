@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """
-High‑Winrate Forex Swing Bot – 5 TPs (min RR 1:2) + Chart on Close + Alerts
+High‑Winrate Forex Swing Bot – 5 TPs (0.4/0.8/1.2/1.6/2.0) + Chart on Close + Alerts
+Stop Loss: max(1.0*ATR, 8 pips), capped at 30 pips.
+After TP1 hit → SL moves to entry (risk‑free).
 """
 
 import requests, json, os, traceback
@@ -85,7 +87,6 @@ def save_csv(f, df):
     df.to_csv(f, index=False)
 
 def initialize_trade_files():
-    # Now 5 TPs
     init_csv(TRADE_LOG_CSV, ["timestamp","symbol","action","entry","stop",
                              "TP1","TP2","TP3","TP4","TP5","score"])
     init_csv(OPEN_TRADES_CSV, ["timestamp","symbol","action","entry","stop",
@@ -222,7 +223,7 @@ def support_resistance_levels(df, lookback=20):
     low = recent['Low'].min()
     return high, low
 
-# ========== MULTI‑LAYER SCORING (unchanged) ==========
+# ========== MULTI‑LAYER SCORING ==========
 def score_pair(pair):
     df_d = get_data(pair, interval='1d', days=90)
     if df_d.empty or len(df_d) < 50:
@@ -313,7 +314,7 @@ def score_pair(pair):
 
     return total, direction, price, atr_val, (sup if direction == "LONG" else res)
 
-# ========== SIGNAL GENERATION (5 TPs, min RR 1:2) ==========
+# ========== SIGNAL GENERATION (FIXED TPs) ==========
 def generate_signal():
     open_symbols = set()
     try:
@@ -363,8 +364,8 @@ def generate_signal():
     stop = round(stop, 6)
     risk = abs(price - stop)
 
-    # 5 take‑profits with minimum RR 1:2 (TP1 = 2*risk)
-    tp_multipliers = [2.0, 2.5, 3.0, 3.5, 4.0]
+    # 5 take‑profits: 0.4, 0.8, 1.2, 1.6, 2.0 × risk
+    tp_multipliers = [0.4, 0.8, 1.2, 1.6, 2.0]
     tps = []
     for m in tp_multipliers:
         if direction == "LONG":
@@ -409,8 +410,7 @@ def check_open_trades():
     still_open = []
     alerts = []
     now = datetime.now()
-    # 5 TPs with equal 20% fractions
-    tp_multipliers = [2.0, 2.5, 3.0, 3.5, 4.0]
+    tp_multipliers = [0.4, 0.8, 1.2, 1.6, 2.0]
     fractions = [0.20, 0.20, 0.20, 0.20, 0.20]
 
     for idx, trade in open_df.iterrows():
@@ -483,7 +483,8 @@ def check_open_trades():
                         if i == 0:
                             current_stop = entry
                     alerts.append(f"🚀 {sym} {direction} TP{i+1} hit — {fraction*100:.0f}% closed, SL to BE")
-                    # Send chart for this partial close
+
+                    # Chart on partial close
                     send_closed_trade_chart(trade, f"TP{i+1}", exit_price, pnl, remaining_qty)
 
                 if remaining_qty <= 0:
@@ -505,7 +506,8 @@ def check_open_trades():
                     update_portfolio({'pnl': pnl})
                     remaining_qty = 0
                     alerts.append(f"🔴 {sym} {direction} → {desc}")
-                    # Send chart for stop loss close
+
+                    # Chart on stop loss
                     send_closed_trade_chart(trade, desc, exit_price, pnl, 0)
                     break
 
@@ -529,9 +531,6 @@ def check_open_trades():
 
 # ========== CHART ON TRADE CLOSE ==========
 def send_closed_trade_chart(trade, hit_level, exit_price, pnl, remaining_qty):
-    """
-    Generate a chart for the closed trade, showing the whole price action from entry to now.
-    """
     sym = trade["symbol"]
     entry = float(trade["entry"])
     stop = float(trade["stop"])
@@ -544,7 +543,6 @@ def send_closed_trade_chart(trade, hit_level, exit_price, pnl, remaining_qty):
         import matplotlib.pyplot as plt
         import mplfinance as mpf
 
-        # Get data from entry time to now (1h candles for better resolution)
         entry_time = datetime.strptime(trade["timestamp"], "%Y-%m-%d %H:%M:%S")
         df = get_data(sym, interval='1h', start=entry_time, end=datetime.now())
         if df.empty:
@@ -614,7 +612,7 @@ def format_signal(sig):
         f"Lot Size: {lot:.2f} (Risk: 1%)"
     )
 
-# ========== CHART ON SIGNAL (unchanged) ==========
+# ========== CHART ON SIGNAL ==========
 def send_trade_chart(signal):
     sym = signal['symbol']
     try:
