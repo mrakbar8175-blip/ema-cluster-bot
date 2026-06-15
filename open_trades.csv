@@ -1,0 +1,2 @@
+timestamp,symbol,action,entry,stop,TP1,TP2,TP3,TP4,TP5,status,quantity,original_qty,highest_tp,lot_size
+2026-06-15 16:40:48,CADJPY,SHORT,114.53800201416016,114.757146,114.099714,113.990142,113.88057,113.770998,113.661426,open,50.0,50.0,-1,0.05
