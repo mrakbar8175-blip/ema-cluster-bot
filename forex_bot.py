@@ -502,22 +502,21 @@ def check_open_trades():
     if alerts:
         send_telegram("Trade updates:\n" + "\n".join(alerts))
 
-# ========== CHART (fixed) ==========
+# ========== CHART (FIXED – NO VWAP DIVISION BY ZERO) ==========
 def send_trade_chart(signal):
     """
     Generate dark 4h chart with EMA50, VWAP, entry, SL, TPs.
-    If image fails, send a TradingView link.
+    If total volume is zero, skip VWAP. If any error, send TradingView link.
     """
     sym = signal['symbol']
 
-    # --- Image generation attempt ---
     try:
         import matplotlib
         matplotlib.use('Agg')
         import matplotlib.pyplot as plt
         import mplfinance as mpf
 
-        # Try 21 days of 4h data
+        # Fetch 21 days of 4h data for enough candles
         df = get_data(sym, interval='4h', days=21)
         if df.empty or len(df) < 20:
             raise ValueError(f"Only {len(df)} 4h candles")
@@ -532,19 +531,25 @@ def send_trade_chart(signal):
                 'axes.titlecolor': 'white'}
         )
 
+        # EMA50 – use available length if less than 50
         ema50 = df['Close'].ewm(span=min(50, len(df)), adjust=False).mean()
-        typical = (df['High'] + df['Low'] + df['Close']) / 3
-        vwap = (typical * df['Volume']).cumsum() / df['Volume'].cumsum()
-
-        apds = [
-            mpf.make_addplot(ema50, color='#f39c12', width=1.5, label='EMA50'),
-            mpf.make_addplot(vwap, color='#3498db', width=1, linestyle='--', label='VWAP')
+        addplots = [
+            mpf.make_addplot(ema50, color='#f39c12', width=1.5, label='EMA50')
         ]
+
+        # VWAP only if we have non‑zero total volume
+        total_vol = df['Volume'].sum()
+        if total_vol > 0:
+            typical = (df['High'] + df['Low'] + df['Close']) / 3
+            vwap = (typical * df['Volume']).cumsum() / df['Volume'].cumsum()
+            addplots.append(
+                mpf.make_addplot(vwap, color='#3498db', width=1, linestyle='--', label='VWAP')
+            )
 
         title = f"{sym} 4h"
 
         fig, axes = mpf.plot(df, type='candle', style=mpf_style,
-                             title=title, ylabel='Price', addplot=apds,
+                             title=title, ylabel='Price', addplot=addplots,
                              returnfig=True, figsize=(8,6))
         ax = axes[0]
 
@@ -571,6 +576,7 @@ def send_trade_chart(signal):
                 print(f"Telegram photo send failed: {resp.text}")
         os.remove(chart_path)
         return  # success
+
     except Exception as e:
         print(f"Chart image error: {e}")
         send_telegram(f"⚠️ Chart image unavailable ({str(e)[:80]}).")
