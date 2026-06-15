@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-High‑Winrate Forex Swing Bot
-Multi‑layer confirmation: daily trend → 4h trend → 1h entry
-Only fires when all conditions align — no AI, no social fluff.
+High‑Winrate Forex Swing Bot + Chart
+Multi‑timeframe confirmation (daily/4h/1h) with dark chart sent to Telegram.
 """
 
 import requests, json, os, traceback
@@ -17,18 +16,18 @@ CHAT_ID = os.environ["CHAT_ID"]
 
 # ========== FOREX UNIVERSE (50+ pairs) ==========
 FOREX_PAIRS = [
-    "EURUSD", "USDJPY", "GBPUSD", "AUDUSD", "USDCAD", "NZDUSD", "USDCHF",
-    "EURGBP", "EURJPY", "EURCHF", "EURAUD", "EURCAD", "EURNZD",
-    "GBPJPY", "GBPCHF", "GBPAUD", "GBPCAD", "GBPNZD",
-    "AUDJPY", "AUDCHF", "AUDCAD", "AUDNZD",
-    "CADJPY", "CHFJPY", "NZDCAD", "NZDJPY", "NZDCHF",
-    "USDMXN", "USDTRY", "USDZAR", "USDHKD", "USDSGD",
-    "USDNOK", "USDSEK", "USDDKK", "USDPLN",
-    "USDTHB", "USDHUF", "USDILS", "USDCZK",
-    "USDCLP", "USDCOP", "USDPHP", "USDIDR", "USDINR", "USDKRW",
-    "USDMYR", "USDTWD", "USDCNH",
-    "EURMXN", "EURTRY", "EURZAR", "EURNOK", "EURSEK",
-    "GBPMXN", "GBPZAR", "GBPTRY", "GBPNOK", "GBPSEK",
+    "EURUSD","USDJPY","GBPUSD","AUDUSD","USDCAD","NZDUSD","USDCHF",
+    "EURGBP","EURJPY","EURCHF","EURAUD","EURCAD","EURNZD",
+    "GBPJPY","GBPCHF","GBPAUD","GBPCAD","GBPNZD",
+    "AUDJPY","AUDCHF","AUDCAD","AUDNZD",
+    "CADJPY","CHFJPY","NZDCAD","NZDJPY","NZDCHF",
+    "USDMXN","USDTRY","USDZAR","USDHKD","USDSGD",
+    "USDNOK","USDSEK","USDDKK","USDPLN",
+    "USDTHB","USDHUF","USDILS","USDCZK",
+    "USDCLP","USDCOP","USDPHP","USDIDR","USDINR","USDKRW",
+    "USDMYR","USDTWD","USDCNH",
+    "EURMXN","EURTRY","EURZAR","EURNOK","EURSEK",
+    "GBPMXN","GBPZAR","GBPTRY","GBPNOK","GBPSEK",
 ]
 
 def pip_scale(sym):
@@ -87,14 +86,14 @@ def save_csv(f, df):
     df.to_csv(f, index=False)
 
 def initialize_trade_files():
-    init_csv(TRADE_LOG_CSV, ["timestamp", "symbol", "action", "entry", "stop",
-                             "TP1", "TP2", "TP3", "score"])
-    init_csv(OPEN_TRADES_CSV, ["timestamp", "symbol", "action", "entry", "stop",
-                               "TP1", "TP2", "TP3", "status", "quantity",
-                               "original_qty", "highest_tp", "lot_size"])
-    init_csv(TRADE_RESULTS_CSV, ["timestamp", "symbol", "action", "entry", "stop",
-                                 "TP1", "TP2", "TP3", "status", "hit_level",
-                                 "close_time", "exit_price", "quantity", "pnl"])
+    init_csv(TRADE_LOG_CSV, ["timestamp","symbol","action","entry","stop",
+                             "TP1","TP2","TP3","score"])
+    init_csv(OPEN_TRADES_CSV, ["timestamp","symbol","action","entry","stop",
+                               "TP1","TP2","TP3","status","quantity",
+                               "original_qty","highest_tp","lot_size"])
+    init_csv(TRADE_RESULTS_CSV, ["timestamp","symbol","action","entry","stop",
+                                 "TP1","TP2","TP3","status","hit_level",
+                                 "close_time","exit_price","quantity","pnl"])
 
 def log_signal(sig):
     row = {
@@ -218,32 +217,28 @@ def support_resistance_levels(df, lookback=20):
 
 # ========== MULTI‑LAYER SCORING ==========
 def score_pair(pair):
-    # Daily data for strong trend filter
     df_d = get_data(pair, interval='1d', days=90)
     if df_d.empty or len(df_d) < 50:
         return 0, None, None, None, None
 
-    # 4h data for main analysis
     df_4h = get_data(pair, interval='4h', days=14)
     if df_4h.empty or len(df_4h) < 50:
         return 0, None, None, None, None
 
     price = df_4h['Close'].iloc[-1]
 
-    # ----- DAILY TREND (mandatory) -----
+    # Daily trend
     ema50_d = ema(df_d['Close'], 50)
     ema200_d = ema(df_d['Close'], 200)
     trend_daily = 0
     if price > ema50_d.iloc[-1] and ema50_d.iloc[-1] > ema200_d.iloc[-1]:
-        trend_daily = 1   # strong uptrend
+        trend_daily = 1
     elif price < ema50_d.iloc[-1] and ema50_d.iloc[-1] < ema200_d.iloc[-1]:
-        trend_daily = -1  # strong downtrend
-    # Neutral if mixed — we skip mixed signals
-
+        trend_daily = -1
     if trend_daily == 0:
-        return 0, None, None, None, None  # No trade without daily trend
+        return 0, None, None, None, None
 
-    # ----- 4H CONFIRMATION -----
+    # 4h indicators
     ema50_4h = ema(df_4h['Close'], 50)
     ema200_4h = ema(df_4h['Close'], 200)
     adx_val, di_plus, di_minus = adx(df_4h)
@@ -252,12 +247,10 @@ def score_pair(pair):
     atr_val = atr(df_4h)
     res, sup = support_resistance_levels(df_4h, 20)
 
-    # Volume surge check (last 4h candle vs average of previous 5)
     vol_last = df_4h['Volume'].iloc[-1]
     vol_avg = df_4h['Volume'].iloc[-6:-1].mean() if len(df_4h) >= 6 else vol_last
     vol_surge = vol_last > vol_avg * 1.2
 
-    # DXY correlation
     dxy_df = get_dxy(interval='4h', days=14)
     dxy_aligned = False
     if not dxy_df.empty:
@@ -266,40 +259,30 @@ def score_pair(pair):
         quote = pair[3:]
         if quote == "USD":
             dxy_aligned = dxy_trend_up if trend_daily == 1 else not dxy_trend_up
-        elif quote in ("EUR", "GBP", "AUD", "NZD", "CAD", "CHF"):
+        elif quote in ("EUR","GBP","AUD","NZD","CAD","CHF"):
             dxy_aligned = not dxy_trend_up if trend_daily == 1 else dxy_trend_up
 
-    # --- Build individual scores (0 or 1 per condition) ---
     def bool_score(cond):
         return 1 if cond else 0
 
-    # Direction from daily trend
     direction = "LONG" if trend_daily == 1 else "SHORT"
 
-    # 4h EMA alignment
     if direction == "LONG":
         ema_align = price > ema50_4h.iloc[-1] and ema50_4h.iloc[-1] > ema200_4h.iloc[-1]
     else:
         ema_align = price < ema50_4h.iloc[-1] and ema50_4h.iloc[-1] < ema200_4h.iloc[-1]
     ema_score = bool_score(ema_align)
 
-    # ADX trending (>20) and direction correct
     adx_trending = adx_val > 20
-    if direction == "LONG":
-        adx_dir = di_plus > di_minus
-    else:
-        adx_dir = di_minus > di_plus
+    adx_dir = (di_plus > di_minus) if direction == "LONG" else (di_minus > di_plus)
     adx_score = bool_score(adx_trending and adx_dir)
 
-    # RSI confirmation (LONG: RSI>50, SHORT: RSI<50)
     rsi_score = bool_score((direction == "LONG" and rsi_val > 50) or (direction == "SHORT" and rsi_val < 50))
 
-    # MACD histogram expanding in direction
     macd_expanding = (direction == "LONG" and macd_hist > 0 and macd_hist > macd_hist_prev) or \
                      (direction == "SHORT" and macd_hist < 0 and macd_hist < macd_hist_prev)
     macd_score = bool_score(macd_expanding)
 
-    # Support/Resistance proximity (bounce)
     if direction == "LONG":
         near_support = (price - sup) < atr_val * 0.5
         sr_score = bool_score(near_support)
@@ -307,13 +290,9 @@ def score_pair(pair):
         near_resistance = (res - price) < atr_val * 0.5
         sr_score = bool_score(near_resistance)
 
-    # Volume surge
     vol_score = bool_score(vol_surge)
-
-    # DXY aligned
     dxy_score = bool_score(dxy_aligned)
 
-    # Combined score (weighted toward trend and momentum)
     total = (
         ema_score * 2.0 +
         adx_score * 1.5 +
@@ -324,7 +303,6 @@ def score_pair(pair):
         dxy_score * 0.5
     )
 
-    # Only trade if total >= 5 (i.e., at least 3-4 conditions strong)
     if total < 5:
         return 0, None, None, None, None
 
@@ -351,15 +329,12 @@ def generate_signal():
     if not candidates:
         return None
 
-    # Choose highest score
     candidates.sort(key=lambda x: x[1], reverse=True)
     best = candidates[0]
     pair, score, direction, price, atr_val, swing_level = best
 
-    # Stop Loss: 1.5 * ATR, but place beyond swing level if better
     min_stop_dist = 1.5 * atr_val
     if direction == "LONG":
-        # Stop below recent low or 1.5 ATR below entry
         stop = min(price - min_stop_dist, swing_level - 0.1 * atr_val)
     else:
         stop = max(price + min_stop_dist, swing_level + 0.1 * atr_val)
@@ -368,10 +343,9 @@ def generate_signal():
     risk_per_share = abs(price - stop)
     risk_amount = portfolio['balance'] * 0.01
     qty_base = risk_amount / risk_per_share
-    lot_size = max(0.01, round(qty_base / 1000, 2))  # micro lots
+    lot_size = max(0.01, round(qty_base / 1000, 2))
     actual_units = lot_size * 1000
 
-    # TP multiples (0.5, 1.0, 1.5)
     mults = [0.5, 1.0, 1.5]
     tps = []
     for m in mults:
@@ -525,6 +499,69 @@ def check_open_trades():
     if alerts:
         send_telegram("Trade updates:\n" + "\n".join(alerts))
 
+# ========== CHART GENERATION ==========
+def send_trade_chart(signal):
+    """Generate 4h chart with EMA50, VWAP, entry, SL, TPs, and send as Telegram photo."""
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        import mplfinance as mpf
+
+        sym = signal['symbol']
+        df = get_data(sym, interval='4h', days=10)
+        if df.empty or len(df) < 20:
+            return
+
+        mpf_style = mpf.make_mpf_style(
+            base_mpf_style='nightclouds',
+            facecolor='#000000',
+            gridcolor='#2a2e39',
+            rc={'axes.labelcolor': 'white',
+                'xtick.color': 'white',
+                'ytick.color': 'white',
+                'axes.titlecolor': 'white'}
+        )
+
+        ema50 = df['Close'].ewm(span=50, adjust=False).mean()
+        typical = (df['High'] + df['Low'] + df['Close']) / 3
+        vwap = (typical * df['Volume']).cumsum() / df['Volume'].cumsum()
+
+        apds = [
+            mpf.make_addplot(ema50, color='#f39c12', width=1.5, label='EMA50'),
+            mpf.make_addplot(vwap, color='#3498db', width=1, linestyle='--', label='VWAP')
+        ]
+
+        title = f"{sym} 4h"
+
+        fig, axes = mpf.plot(df, type='candle', style=mpf_style,
+                             title=title, ylabel='Price', addplot=apds,
+                             returnfig=True, figsize=(8,6))
+        ax = axes[0]
+
+        entry = signal.get('limit_price')
+        stop = signal.get('stop_loss')
+        tps = signal.get('take_profits')
+        if entry is not None and stop is not None:
+            ax.axhline(y=entry, color='#f1c40f', linestyle='--', linewidth=1.5, label='Entry')
+            ax.axhline(y=stop, color='#e74c3c', linestyle='--', linewidth=1.5, label='Stop')
+            if tps:
+                for i, tp in enumerate(tps):
+                    ax.axhline(y=tp, color='#2ecc71', linestyle='--', linewidth=1, alpha=0.8,
+                               label=f'TP{i+1}' if i==0 else None)
+            ax.legend(loc='upper left', facecolor='#000000', edgecolor='white', labelcolor='white')
+
+        chart_path = f"{sym}_chart.png"
+        fig.savefig(chart_path, dpi=150, bbox_inches='tight', facecolor='black')
+        plt.close(fig)
+
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
+        with open(chart_path, 'rb') as img:
+            requests.post(url, data={'chat_id': CHAT_ID}, files={'photo': img})
+        os.remove(chart_path)
+    except Exception as e:
+        print(f"Chart error: {e}")
+
 # ========== TELEGRAM ==========
 def send_telegram(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -569,7 +606,8 @@ def main():
             add_open_trade(sig)
             portfolio['open_positions'] += 1
             save_portfolio(portfolio)
-            send_telegram(format_signal(sig))
+            send_telegram(format_signal(sig))     # text signal
+            send_trade_chart(sig)                 # chart image
         else:
             send_telegram("HOLD – No high‑conviction setup found.")
     except Exception as e:
