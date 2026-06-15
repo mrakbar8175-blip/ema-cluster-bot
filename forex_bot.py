@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-High‑Winrate Forex Swing Bot – Tight Stops + Chart + Alerts
-Stop Loss: max(1.0*ATR, 8 pips), capped at 30 pips.
+High‑Winrate Forex Swing Bot – 5 TPs (min RR 1:2) + Chart on Close + Alerts
 """
 
 import requests, json, os, traceback
@@ -86,14 +85,15 @@ def save_csv(f, df):
     df.to_csv(f, index=False)
 
 def initialize_trade_files():
+    # Now 5 TPs
     init_csv(TRADE_LOG_CSV, ["timestamp","symbol","action","entry","stop",
-                             "TP1","TP2","TP3","score"])
+                             "TP1","TP2","TP3","TP4","TP5","score"])
     init_csv(OPEN_TRADES_CSV, ["timestamp","symbol","action","entry","stop",
-                               "TP1","TP2","TP3","status","quantity",
-                               "original_qty","highest_tp","lot_size"])
+                               "TP1","TP2","TP3","TP4","TP5","status",
+                               "quantity","original_qty","highest_tp","lot_size"])
     init_csv(TRADE_RESULTS_CSV, ["timestamp","symbol","action","entry","stop",
-                                 "TP1","TP2","TP3","status","hit_level",
-                                 "close_time","exit_price","quantity","pnl"])
+                                 "TP1","TP2","TP3","TP4","TP5","status",
+                                 "hit_level","close_time","exit_price","quantity","pnl"])
 
 def log_signal(sig):
     row = {
@@ -105,6 +105,8 @@ def log_signal(sig):
         "TP1": sig["take_profits"][0],
         "TP2": sig["take_profits"][1],
         "TP3": sig["take_profits"][2],
+        "TP4": sig["take_profits"][3],
+        "TP5": sig["take_profits"][4],
         "score": sig["score"],
     }
     append_csv(TRADE_LOG_CSV, pd.DataFrame([row]))
@@ -119,6 +121,8 @@ def add_open_trade(sig):
         "TP1": sig["take_profits"][0],
         "TP2": sig["take_profits"][1],
         "TP3": sig["take_profits"][2],
+        "TP4": sig["take_profits"][3],
+        "TP5": sig["take_profits"][4],
         "status": "open",
         "quantity": sig["quantity"],
         "original_qty": sig["quantity"],
@@ -218,7 +222,7 @@ def support_resistance_levels(df, lookback=20):
     low = recent['Low'].min()
     return high, low
 
-# ========== MULTI‑LAYER SCORING ==========
+# ========== MULTI‑LAYER SCORING (unchanged) ==========
 def score_pair(pair):
     df_d = get_data(pair, interval='1d', days=90)
     if df_d.empty or len(df_d) < 50:
@@ -230,7 +234,6 @@ def score_pair(pair):
 
     price = df_4h['Close'].iloc[-1]
 
-    # Daily trend
     ema50_d = ema(df_d['Close'], 50)
     ema200_d = ema(df_d['Close'], 200)
     trend_daily = 0
@@ -241,7 +244,6 @@ def score_pair(pair):
     if trend_daily == 0:
         return 0, None, None, None, None
 
-    # 4h indicators
     ema50_4h = ema(df_4h['Close'], 50)
     ema200_4h = ema(df_4h['Close'], 200)
     adx_val, di_plus, di_minus = adx(df_4h)
@@ -311,7 +313,7 @@ def score_pair(pair):
 
     return total, direction, price, atr_val, (sup if direction == "LONG" else res)
 
-# ========== SIGNAL GENERATION (TIGHT STOPS) ==========
+# ========== SIGNAL GENERATION (5 TPs, min RR 1:2) ==========
 def generate_signal():
     open_symbols = set()
     try:
@@ -339,9 +341,7 @@ def generate_signal():
     ps = pip_scale(pair)
     min_pips = 8
     max_pips = 30
-    # Base stop = 1.0 * ATR
     raw_stop_pips = (1.0 * atr_val) / ps
-    # Apply floor and cap
     if raw_stop_pips < min_pips:
         stop_distance_pips = min_pips
     elif raw_stop_pips > max_pips:
@@ -353,7 +353,6 @@ def generate_signal():
 
     if direction == "LONG":
         stop = price - stop_distance
-        # Tighten further if swing low gives an even better level
         if swing_level is not None and swing_level > price - stop_distance * 1.2:
             stop = min(stop, swing_level - 0.05 * atr_val)
     else:
@@ -362,20 +361,21 @@ def generate_signal():
             stop = max(stop, swing_level + 0.05 * atr_val)
 
     stop = round(stop, 6)
+    risk = abs(price - stop)
 
-    risk_per_share = abs(price - stop)
+    # 5 take‑profits with minimum RR 1:2 (TP1 = 2*risk)
+    tp_multipliers = [2.0, 2.5, 3.0, 3.5, 4.0]
+    tps = []
+    for m in tp_multipliers:
+        if direction == "LONG":
+            tps.append(round(price + m * risk, 6))
+        else:
+            tps.append(round(price - m * risk, 6))
+
     risk_amount = portfolio['balance'] * 0.01
-    qty_base = risk_amount / risk_per_share
+    qty_base = risk_amount / risk
     lot_size = max(0.01, round(qty_base / 1000, 2))
     actual_units = lot_size * 1000
-
-    mults = [0.5, 1.0, 1.5]
-    tps = []
-    for m in mults:
-        if direction == "LONG":
-            tps.append(round(price + m * risk_per_share, 6))
-        else:
-            tps.append(round(price - m * risk_per_share, 6))
 
     return {
         "action": direction,
@@ -388,7 +388,7 @@ def generate_signal():
         "score": score,
     }
 
-# ========== TRADE MANAGEMENT ==========
+# ========== TRADE MANAGEMENT (5 TPs, chart on close) ==========
 def check_open_trades():
     try:
         open_df = pd.read_csv(OPEN_TRADES_CSV)
@@ -409,8 +409,9 @@ def check_open_trades():
     still_open = []
     alerts = []
     now = datetime.now()
-    mults = [0.5, 1.0, 1.5]
-    fractions = [0.50, 0.30, 0.20]
+    # 5 TPs with equal 20% fractions
+    tp_multipliers = [2.0, 2.5, 3.0, 3.5, 4.0]
+    fractions = [0.20, 0.20, 0.20, 0.20, 0.20]
 
     for idx, trade in open_df.iterrows():
         sym = trade["symbol"]
@@ -422,7 +423,7 @@ def check_open_trades():
         risk = abs(entry - stop_orig)
 
         tps = []
-        for m in mults:
+        for m in tp_multipliers:
             if direction == "LONG":
                 tps.append(entry + m * risk)
             else:
@@ -481,7 +482,9 @@ def check_open_trades():
                         highest_tp_idx = i
                         if i == 0:
                             current_stop = entry
-                    alerts.append(f"🚀 {sym} {direction} TP{i+1} hit — partial close, SL to BE")
+                    alerts.append(f"🚀 {sym} {direction} TP{i+1} hit — {fraction*100:.0f}% closed, SL to BE")
+                    # Send chart for this partial close
+                    send_closed_trade_chart(trade, f"TP{i+1}", exit_price, pnl, remaining_qty)
 
                 if remaining_qty <= 0:
                     break
@@ -502,6 +505,8 @@ def check_open_trades():
                     update_portfolio({'pnl': pnl})
                     remaining_qty = 0
                     alerts.append(f"🔴 {sym} {direction} → {desc}")
+                    # Send chart for stop loss close
+                    send_closed_trade_chart(trade, desc, exit_price, pnl, 0)
                     break
 
         if remaining_qty > 0:
@@ -522,14 +527,96 @@ def check_open_trades():
     if alerts:
         send_telegram("Trade updates:\n" + "\n".join(alerts))
 
-# ========== CHART (FIXED – NO VWAP DIVISION BY ZERO) ==========
-def send_trade_chart(signal):
+# ========== CHART ON TRADE CLOSE ==========
+def send_closed_trade_chart(trade, hit_level, exit_price, pnl, remaining_qty):
     """
-    Generate dark 4h chart with EMA50, VWAP, entry, SL, TPs.
-    If total volume is zero, skip VWAP. If any error, send TradingView link.
+    Generate a chart for the closed trade, showing the whole price action from entry to now.
     """
-    sym = signal['symbol']
+    sym = trade["symbol"]
+    entry = float(trade["entry"])
+    stop = float(trade["stop"])
+    tps = [float(trade[f"TP{i+1}"]) for i in range(5)]
+    direction = trade["action"]
 
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        import mplfinance as mpf
+
+        # Get data from entry time to now (1h candles for better resolution)
+        entry_time = datetime.strptime(trade["timestamp"], "%Y-%m-%d %H:%M:%S")
+        df = get_data(sym, interval='1h', start=entry_time, end=datetime.now())
+        if df.empty:
+            return
+
+        mpf_style = mpf.make_mpf_style(
+            base_mpf_style='nightclouds',
+            facecolor='#000000',
+            gridcolor='#2a2e39',
+            rc={'axes.labelcolor': 'white',
+                'xtick.color': 'white',
+                'ytick.color': 'white',
+                'axes.titlecolor': 'white'}
+        )
+
+        title = f"{sym} {direction} – {hit_level} (PnL: {pnl:.2f}$)"
+        fig, ax = mpf.plot(df, type='candle', style=mpf_style,
+                           title=title, ylabel='Price',
+                           returnfig=True, figsize=(8,6))
+
+        ax.axhline(y=entry, color='#f1c40f', linestyle='--', linewidth=1.5, label='Entry')
+        ax.axhline(y=stop, color='#e74c3c', linestyle='--', linewidth=1.5, label='Stop')
+        for i, tp in enumerate(tps):
+            ax.axhline(y=tp, color='#2ecc71', linestyle='--', linewidth=1, alpha=0.6,
+                       label=f'TP{i+1}' if i==0 else None)
+        ax.axhline(y=exit_price, color='#e67e22', linewidth=2, label=f'Exit ({hit_level})')
+        ax.legend(loc='upper left', facecolor='#000000', edgecolor='white', labelcolor='white')
+
+        chart_path = f"{sym}_close_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+        fig.savefig(chart_path, dpi=150, bbox_inches='tight', facecolor='black')
+        plt.close(fig)
+
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
+        with open(chart_path, 'rb') as img:
+            requests.post(url, data={'chat_id': CHAT_ID}, files={'photo': img})
+        os.remove(chart_path)
+    except Exception as e:
+        print(f"Closed trade chart error: {e}")
+
+# ========== TELEGRAM ==========
+def send_telegram(text):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    try:
+        requests.post(url, data={"chat_id": CHAT_ID, "text": text}, timeout=10)
+    except Exception as e:
+        print("Telegram error:", e)
+
+def format_signal(sig):
+    sym = sig["symbol"]
+    dirn = "🟢 LONG" if sig["action"] == "LONG" else "🔴 SHORT"
+    entry = sig["limit_price"]
+    stop = sig["stop_loss"]
+    tps = sig["take_profits"]
+    lot = sig["lot_size"]
+    score = sig["score"]
+    ps = pip_scale(sym)
+    sl_pips = round(abs(entry - stop) / ps, 1)
+    tp_pips = [round(abs(tp - entry) / ps, 1) for tp in tps]
+    tp_str = " / ".join([f"TP{i+1}: {tp:.5f} ({p} pips)" for i, (tp, p) in enumerate(zip(tps, tp_pips))])
+
+    return (
+        f"{dirn} {sym}\n"
+        f"Conviction: {score:.1f}/7.0\n"
+        f"Entry: {entry:.5f}\n"
+        f"Stop Loss: {stop:.5f} ({sl_pips} pips)\n"
+        f"Take Profits: {tp_str}\n"
+        f"Lot Size: {lot:.2f} (Risk: 1%)"
+    )
+
+# ========== CHART ON SIGNAL (unchanged) ==========
+def send_trade_chart(signal):
+    sym = signal['symbol']
     try:
         import matplotlib
         matplotlib.use('Agg')
@@ -551,29 +638,20 @@ def send_trade_chart(signal):
         )
 
         ema50 = df['Close'].ewm(span=min(50, len(df)), adjust=False).mean()
-        addplots = [
-            mpf.make_addplot(ema50, color='#f39c12', width=1.5, label='EMA50')
-        ]
-
-        total_vol = df['Volume'].sum()
-        if total_vol > 0:
+        addplots = [mpf.make_addplot(ema50, color='#f39c12', width=1.5, label='EMA50')]
+        if df['Volume'].sum() > 0:
             typical = (df['High'] + df['Low'] + df['Close']) / 3
             vwap = (typical * df['Volume']).cumsum() / df['Volume'].cumsum()
-            addplots.append(
-                mpf.make_addplot(vwap, color='#3498db', width=1, linestyle='--', label='VWAP')
-            )
-
-        title = f"{sym} 4h"
+            addplots.append(mpf.make_addplot(vwap, color='#3498db', width=1, linestyle='--', label='VWAP'))
 
         fig, axes = mpf.plot(df, type='candle', style=mpf_style,
-                             title=title, ylabel='Price', addplot=addplots,
+                             title=f"{sym} 4h", ylabel='Price', addplot=addplots,
                              returnfig=True, figsize=(8,6))
         ax = axes[0]
-
         entry = signal.get('limit_price')
         stop = signal.get('stop_loss')
         tps = signal.get('take_profits')
-        if entry is not None and stop is not None:
+        if entry:
             ax.axhline(y=entry, color='#f1c40f', linestyle='--', linewidth=1.5, label='Entry')
             ax.axhline(y=stop, color='#e74c3c', linestyle='--', linewidth=1.5, label='Stop')
             if tps:
@@ -589,48 +667,12 @@ def send_trade_chart(signal):
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
         with open(chart_path, 'rb') as img:
             resp = requests.post(url, data={'chat_id': CHAT_ID}, files={'photo': img})
-            if resp.status_code != 200:
-                print(f"Telegram photo send failed: {resp.text}")
         os.remove(chart_path)
-        return
-
     except Exception as e:
         print(f"Chart image error: {e}")
-        send_telegram(f"⚠️ Chart image unavailable ({str(e)[:80]}).")
-
-    studies = "&studies[]=STD%3BEMA%3B50&studies[]=STD%3BVWAP"
-    tv_url = f"https://www.tradingview.com/chart/?symbol=FX:{sym}&interval=240{studies}"
-    send_telegram(f"📈 {sym} 4h chart (EMA50 + VWAP): {tv_url}")
-
-# ========== TELEGRAM ==========
-def send_telegram(text):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    try:
-        requests.post(url, data={"chat_id": CHAT_ID, "text": text}, timeout=10)
-    except Exception as e:
-        print("Telegram error:", e)
-
-def format_signal(sig):
-    sym = sig["symbol"]
-    dirn = "🟢 LONG" if sig["action"] == "LONG" else "🔴 SHORT"
-    entry = sig["limit_price"]
-    stop = sig["stop_loss"]
-    tps = sig["take_profits"]
-    lot = sig["lot_size"]
-    score = sig["score"]
-    ps = pip_scale(sym)
-    sl_pips = round(abs(entry - stop) / ps, 1)
-    tp_pips = [round(abs(tp - entry) / ps, 1) for tp in tps]
-    tp_str = " / ".join([f"{tp:.5f} ({p} pips)" for tp, p in zip(tps, tp_pips)])
-
-    return (
-        f"{dirn} {sym}\n"
-        f"Conviction: {score:.1f}/7.0\n"
-        f"Entry: {entry:.5f}\n"
-        f"Stop Loss: {stop:.5f} ({sl_pips} pips)\n"
-        f"Take Profits: {tp_str}\n"
-        f"Lot Size: {lot:.2f} (Risk: 1%)"
-    )
+        studies = "&studies[]=STD%3BEMA%3B50&studies[]=STD%3BVWAP"
+        tv_url = f"https://www.tradingview.com/chart/?symbol=FX:{sym}&interval=240{studies}"
+        send_telegram(f"📈 Chart unavailable – view here: {tv_url}")
 
 # ========== MAIN ==========
 def main():
