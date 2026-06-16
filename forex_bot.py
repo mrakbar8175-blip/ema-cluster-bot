@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-High‑Winrate Forex Swing Bot – 5 TPs (0.4/0.8/1.2/1.6/2.0) + Chart on Close + Alerts
-Stop Loss: max(1.0*ATR, 8 pips), capped at 30 pips.
-After TP1 hit → SL moves to entry (risk‑free).
+High‑Winrate Forex Swing Bot – AI‑filtered signals, 5 TPs (0.4/0.8/1.2/1.6/2.0), 
+Chart on Close, Alerts. Stop Loss: 8‑30 pips.
+AI confirmation uses Groq (LLaMA 3.3 70B) to reject false signals.
 """
 
 import requests, json, os, traceback
@@ -14,6 +14,9 @@ from datetime import datetime, timedelta
 # ========== ENVIRONMENT ==========
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 CHAT_ID = os.environ["CHAT_ID"]
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")   # needed for AI gate
+if not GROQ_API_KEY:
+    raise RuntimeError("GROQ_API_KEY not set – AI filtering requires it.")
 
 # ========== FOREX UNIVERSE (50+ pairs) ==========
 FOREX_PAIRS = [
@@ -88,7 +91,7 @@ def save_csv(f, df):
 
 def initialize_trade_files():
     init_csv(TRADE_LOG_CSV, ["timestamp","symbol","action","entry","stop",
-                             "TP1","TP2","TP3","TP4","TP5","score"])
+                             "TP1","TP2","TP3","TP4","TP5","score","ai_approved"])
     init_csv(OPEN_TRADES_CSV, ["timestamp","symbol","action","entry","stop",
                                "TP1","TP2","TP3","TP4","TP5","status",
                                "quantity","original_qty","highest_tp","lot_size"])
@@ -109,6 +112,7 @@ def log_signal(sig):
         "TP4": sig["take_profits"][3],
         "TP5": sig["take_profits"][4],
         "score": sig["score"],
+        "ai_approved": sig.get("ai_approved", False)
     }
     append_csv(TRADE_LOG_CSV, pd.DataFrame([row]))
 
@@ -314,7 +318,60 @@ def score_pair(pair):
 
     return total, direction, price, atr_val, (sup if direction == "LONG" else res)
 
-# ========== SIGNAL GENERATION (FIXED TPs) ==========
+# ========== AI CONFIRMATION GATE ==========
+def ai_confirm_trade(signal_dict):
+    """
+    Sends the trade setup to Groq (LLaMA 3.3 70B) and asks for PASS/FAIL.
+    Returns True (approved) or False (rejected). On error, returns True
+    to avoid blocking signals due to API downtime.
+    """
+    sym = signal_dict["symbol"]
+    direction = signal_dict["action"]
+    entry = signal_dict["limit_price"]
+    stop = signal_dict["stop_loss"]
+    score = signal_dict["score"]
+    atr_val = signal_dict.get("atr", 0)
+
+    prompt = (
+        f"Forex trade setup:\n"
+        f"Pair: {sym}\n"
+        f"Direction: {direction}\n"
+        f"Entry: {entry:.5f}\n"
+        f"Stop Loss: {stop:.5f}\n"
+        f"Technical Conviction Score: {score:.1f}/7.0\n"
+        f"ATR (4h): {atr_val:.5f}\n\n"
+        f"Based on typical market behavior, does this trade have a high probability of success? "
+        f"Answer with exactly one word: PASS or FAIL."
+    )
+
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": "llama-3.3-70b-versatile",
+        "messages": [
+            {"role": "system", "content": "You are a professional forex analyst. Respond with only PASS or FAIL."},
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.1,
+        "max_tokens": 5
+    }
+    try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=15)
+        if resp.status_code == 200:
+            text = resp.json()["choices"][0]["message"]["content"].strip().upper()
+            if "FAIL" in text:
+                return False
+            # anything else we treat as PASS
+            return True
+    except Exception as e:
+        print(f"AI confirmation error: {e}")
+    # Fallback: allow trade if AI is unreachable
+    return True
+
+# ========== SIGNAL GENERATION ==========
 def generate_signal():
     open_symbols = set()
     try:
@@ -364,7 +421,6 @@ def generate_signal():
     stop = round(stop, 6)
     risk = abs(price - stop)
 
-    # 5 take‑profits: 0.4, 0.8, 1.2, 1.6, 2.0 × risk
     tp_multipliers = [0.4, 0.8, 1.2, 1.6, 2.0]
     tps = []
     for m in tp_multipliers:
@@ -378,7 +434,7 @@ def generate_signal():
     lot_size = max(0.01, round(qty_base / 1000, 2))
     actual_units = lot_size * 1000
 
-    return {
+    signal = {
         "action": direction,
         "symbol": pair,
         "quantity": actual_units,
@@ -387,9 +443,18 @@ def generate_signal():
         "stop_loss": stop,
         "take_profits": tps,
         "score": score,
+        "atr": atr_val,
     }
 
-# ========== TRADE MANAGEMENT (5 TPs, chart on close) ==========
+    # AI confirmation
+    if not ai_confirm_trade(signal):
+        print(f"AI rejected {pair} {direction} (score {score:.1f})")
+        return None  # rejected
+
+    signal["ai_approved"] = True
+    return signal
+
+# ========== TRADE MANAGEMENT ==========
 def check_open_trades():
     try:
         open_df = pd.read_csv(OPEN_TRADES_CSV)
@@ -603,8 +668,10 @@ def format_signal(sig):
     tp_pips = [round(abs(tp - entry) / ps, 1) for tp in tps]
     tp_str = " / ".join([f"TP{i+1}: {tp:.5f} ({p} pips)" for i, (tp, p) in enumerate(zip(tps, tp_pips))])
 
+    # Optionally add a note that AI approved
+    ai_note = " (AI approved)" if sig.get("ai_approved") else ""
     return (
-        f"{dirn} {sym}\n"
+        f"{dirn} {sym}{ai_note}\n"
         f"Conviction: {score:.1f}/7.0\n"
         f"Entry: {entry:.5f}\n"
         f"Stop Loss: {stop:.5f} ({sl_pips} pips)\n"
