@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-High‑Winrate Forex Swing Bot – TP1 Optimized (0.3× risk, momentum filtered)
-5 TPs (0.3/0.8/1.2/1.6/2.0) + AI gate + Charts + Alerts
+High‑Winrate Forex Swing Bot – TP1 Optimized (0.4× risk, momentum filtered)
+5 TPs (0.4/0.8/1.2/1.6/2.0) + AI gate + Charts + Alerts
 Stop Loss: 8‑30 pips, anchored to swing level.
 """
 
@@ -323,7 +323,6 @@ def score_pair(pair):
     dxy_score = bool_score(dxy_aligned)
 
     # New TP1‑optimized layers
-    # 1h candle momentum: require strong bullish/bearish close
     if direction == "LONG":
         candle_momentum_ok = bullish_momentum > 0.5   # at least 50% of candle is bullish body
         rsi_1h_ok = rsi_1h < 65                        # not overbought
@@ -376,7 +375,7 @@ def ai_confirm_trade(signal_dict):
         f"Entry: {entry:.5f}\n"
         f"Stop Loss: {stop:.5f}\n"
         f"Technical Conviction Score: {score:.1f}/10.0\n\n"
-        f"Will this trade likely hit TP1 (a small target of ~0.3x the stop distance) before hitting the stop? "
+        f"Will this trade likely hit TP1 (a small target of ~0.4x the stop distance) before hitting the stop? "
         f"Answer with exactly one word: PASS or FAIL."
     )
 
@@ -405,7 +404,7 @@ def ai_confirm_trade(signal_dict):
         pass
     return True
 
-# ========== SIGNAL GENERATION (TP1 optimized: 0.3x risk, capped to 0.5x ATR) ==========
+# ========== SIGNAL GENERATION (TP1 = 0.4R exactly) ==========
 def generate_signal():
     open_symbols = set()
     try:
@@ -455,20 +454,9 @@ def generate_signal():
     stop = round(stop, 6)
     risk = abs(price - stop)
 
-    # TP1: 0.3 × risk, but capped at 0.5 × ATR to keep it achievable
-    tp1_risk_based = 0.3 * risk
-    tp1_max = 0.5 * atr_val
-    tp1_distance = min(tp1_risk_based, tp1_max)
-
-    # Other TPs remain based on risk
-    tp_multipliers = [0.8, 1.2, 1.6, 2.0]
+    # TP multipliers: 0.4, 0.8, 1.2, 1.6, 2.0 × risk
+    tp_multipliers = [0.4, 0.8, 1.2, 1.6, 2.0]
     tps = []
-    # TP1
-    if direction == "LONG":
-        tps.append(round(price + tp1_distance, 6))
-    else:
-        tps.append(round(price - tp1_distance, 6))
-    # TP2-5
     for m in tp_multipliers:
         if direction == "LONG":
             tps.append(round(price + m * risk, 6))
