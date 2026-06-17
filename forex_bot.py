@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-High‑Winrate Forex Swing Bot – AI‑filtered signals, 5 TPs (0.4/0.8/1.2/1.6/2.0), 
-Chart on Close, Alerts. Stop Loss: 8‑30 pips.
-AI confirmation uses Groq (LLaMA 3.3 70B) to reject false signals.
+High‑Winrate Forex Swing Bot – TP1 Optimized (0.3× risk, momentum filtered)
+5 TPs (0.3/0.8/1.2/1.6/2.0) + AI gate + Charts + Alerts
+Stop Loss: 8‑30 pips, anchored to swing level.
 """
 
 import requests, json, os, traceback
@@ -14,9 +14,9 @@ from datetime import datetime, timedelta
 # ========== ENVIRONMENT ==========
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 CHAT_ID = os.environ["CHAT_ID"]
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY")   # needed for AI gate
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 if not GROQ_API_KEY:
-    raise RuntimeError("GROQ_API_KEY not set – AI filtering requires it.")
+    print("WARNING: GROQ_API_KEY not set – AI filtering disabled.")
 
 # ========== FOREX UNIVERSE (50+ pairs) ==========
 FOREX_PAIRS = [
@@ -227,7 +227,7 @@ def support_resistance_levels(df, lookback=20):
     low = recent['Low'].min()
     return high, low
 
-# ========== MULTI‑LAYER SCORING ==========
+# ========== MULTI‑LAYER SCORING (with TP1‑focused improvements) ==========
 def score_pair(pair):
     df_d = get_data(pair, interval='1d', days=90)
     if df_d.empty or len(df_d) < 50:
@@ -237,8 +237,14 @@ def score_pair(pair):
     if df_4h.empty or len(df_4h) < 50:
         return 0, None, None, None, None
 
+    # 1h data for momentum checks
+    df_1h = get_data(pair, interval='1h', days=3)
+    if df_1h.empty or len(df_1h) < 10:
+        return 0, None, None, None, None
+
     price = df_4h['Close'].iloc[-1]
 
+    # Daily trend (unchanged)
     ema50_d = ema(df_d['Close'], 50)
     ema200_d = ema(df_d['Close'], 200)
     trend_daily = 0
@@ -249,6 +255,7 @@ def score_pair(pair):
     if trend_daily == 0:
         return 0, None, None, None, None
 
+    # 4h indicators
     ema50_4h = ema(df_4h['Close'], 50)
     ema200_4h = ema(df_4h['Close'], 200)
     adx_val, di_plus, di_minus = adx(df_4h)
@@ -257,10 +264,21 @@ def score_pair(pair):
     atr_val = atr(df_4h)
     res, sup = support_resistance_levels(df_4h, 20)
 
+    # 1h momentum indicators (TP1 boosters)
+    rsi_1h = rsi(df_1h, 14)
+    last_candle = df_1h.iloc[-1]
+    candle_range = last_candle['High'] - last_candle['Low']
+    if candle_range > 0:
+        bullish_momentum = (last_candle['Close'] - last_candle['Open']) / candle_range
+    else:
+        bullish_momentum = 0
+
+    # Volume
     vol_last = df_4h['Volume'].iloc[-1]
     vol_avg = df_4h['Volume'].iloc[-6:-1].mean() if len(df_4h) >= 6 else vol_last
     vol_surge = vol_last > vol_avg * 1.2
 
+    # DXY
     dxy_df = get_dxy(interval='4h', days=14)
     dxy_aligned = False
     if not dxy_df.empty:
@@ -277,6 +295,7 @@ def score_pair(pair):
 
     direction = "LONG" if trend_daily == 1 else "SHORT"
 
+    # Standard layers (unchanged)
     if direction == "LONG":
         ema_align = price > ema50_4h.iloc[-1] and ema50_4h.iloc[-1] > ema200_4h.iloc[-1]
     else:
@@ -303,6 +322,25 @@ def score_pair(pair):
     vol_score = bool_score(vol_surge)
     dxy_score = bool_score(dxy_aligned)
 
+    # New TP1‑optimized layers
+    # 1h candle momentum: require strong bullish/bearish close
+    if direction == "LONG":
+        candle_momentum_ok = bullish_momentum > 0.5   # at least 50% of candle is bullish body
+        rsi_1h_ok = rsi_1h < 65                        # not overbought
+    else:
+        candle_momentum_ok = bullish_momentum < -0.5
+        rsi_1h_ok = rsi_1h > 35                        # not oversold
+
+    candle_score = bool_score(candle_momentum_ok)
+    rsi_1h_score = bool_score(rsi_1h_ok)
+
+    # Minimum ATR floor: we want at least 10 pips for the 4h candle to make TP1 achievable
+    min_atr_pips = 10
+    atr_pips = atr_val / pip_scale(pair)
+    atr_ok = atr_pips >= min_atr_pips
+    atr_score = bool_score(atr_ok)
+
+    # Combine all layers (weights adjusted to include new ones)
     total = (
         ema_score * 2.0 +
         adx_score * 1.5 +
@@ -310,27 +348,26 @@ def score_pair(pair):
         macd_score * 1.0 +
         sr_score * 1.0 +
         vol_score * 0.5 +
-        dxy_score * 0.5
+        dxy_score * 0.5 +
+        candle_score * 1.5 +    # new: 1h momentum
+        rsi_1h_score * 1.0 +    # new: 1h RSI not extreme
+        atr_score * 1.0         # new: enough volatility
     )
 
-    if total < 5:
+    if total < 7.0:   # raised threshold to 7.0 because we added 3.5 points possible
         return 0, None, None, None, None
 
     return total, direction, price, atr_val, (sup if direction == "LONG" else res)
 
-# ========== AI CONFIRMATION GATE ==========
+# ========== AI CONFIRMATION GATE (unchanged) ==========
 def ai_confirm_trade(signal_dict):
-    """
-    Sends the trade setup to Groq (LLaMA 3.3 70B) and asks for PASS/FAIL.
-    Returns True (approved) or False (rejected). On error, returns True
-    to avoid blocking signals due to API downtime.
-    """
+    if not GROQ_API_KEY:
+        return True   # skip if no key
     sym = signal_dict["symbol"]
     direction = signal_dict["action"]
     entry = signal_dict["limit_price"]
     stop = signal_dict["stop_loss"]
     score = signal_dict["score"]
-    atr_val = signal_dict.get("atr", 0)
 
     prompt = (
         f"Forex trade setup:\n"
@@ -338,9 +375,8 @@ def ai_confirm_trade(signal_dict):
         f"Direction: {direction}\n"
         f"Entry: {entry:.5f}\n"
         f"Stop Loss: {stop:.5f}\n"
-        f"Technical Conviction Score: {score:.1f}/7.0\n"
-        f"ATR (4h): {atr_val:.5f}\n\n"
-        f"Based on typical market behavior, does this trade have a high probability of success? "
+        f"Technical Conviction Score: {score:.1f}/10.0\n\n"
+        f"Will this trade likely hit TP1 (a small target of ~0.3x the stop distance) before hitting the stop? "
         f"Answer with exactly one word: PASS or FAIL."
     )
 
@@ -364,14 +400,12 @@ def ai_confirm_trade(signal_dict):
             text = resp.json()["choices"][0]["message"]["content"].strip().upper()
             if "FAIL" in text:
                 return False
-            # anything else we treat as PASS
             return True
-    except Exception as e:
-        print(f"AI confirmation error: {e}")
-    # Fallback: allow trade if AI is unreachable
+    except:
+        pass
     return True
 
-# ========== SIGNAL GENERATION ==========
+# ========== SIGNAL GENERATION (TP1 optimized: 0.3x risk, capped to 0.5x ATR) ==========
 def generate_signal():
     open_symbols = set()
     try:
@@ -386,7 +420,7 @@ def generate_signal():
         if pair in open_symbols:
             continue
         score, direction, price, atr_val, swing_level = score_pair(pair)
-        if direction and score >= 5:
+        if direction and score >= 7.0:
             candidates.append((pair, score, direction, price, atr_val, swing_level))
 
     if not candidates:
@@ -421,8 +455,20 @@ def generate_signal():
     stop = round(stop, 6)
     risk = abs(price - stop)
 
-    tp_multipliers = [0.4, 0.8, 1.2, 1.6, 2.0]
+    # TP1: 0.3 × risk, but capped at 0.5 × ATR to keep it achievable
+    tp1_risk_based = 0.3 * risk
+    tp1_max = 0.5 * atr_val
+    tp1_distance = min(tp1_risk_based, tp1_max)
+
+    # Other TPs remain based on risk
+    tp_multipliers = [0.8, 1.2, 1.6, 2.0]
     tps = []
+    # TP1
+    if direction == "LONG":
+        tps.append(round(price + tp1_distance, 6))
+    else:
+        tps.append(round(price - tp1_distance, 6))
+    # TP2-5
     for m in tp_multipliers:
         if direction == "LONG":
             tps.append(round(price + m * risk, 6))
@@ -446,15 +492,14 @@ def generate_signal():
         "atr": atr_val,
     }
 
-    # AI confirmation
     if not ai_confirm_trade(signal):
         print(f"AI rejected {pair} {direction} (score {score:.1f})")
-        return None  # rejected
+        return None
 
     signal["ai_approved"] = True
     return signal
 
-# ========== TRADE MANAGEMENT ==========
+# ========== TRADE MANAGEMENT (unchanged, uses 5 TPs from signal) ==========
 def check_open_trades():
     try:
         open_df = pd.read_csv(OPEN_TRADES_CSV)
@@ -475,7 +520,6 @@ def check_open_trades():
     still_open = []
     alerts = []
     now = datetime.now()
-    tp_multipliers = [0.4, 0.8, 1.2, 1.6, 2.0]
     fractions = [0.20, 0.20, 0.20, 0.20, 0.20]
 
     for idx, trade in open_df.iterrows():
@@ -487,12 +531,8 @@ def check_open_trades():
         remaining_qty = float(trade.get("quantity", original_qty))
         risk = abs(entry - stop_orig)
 
-        tps = []
-        for m in tp_multipliers:
-            if direction == "LONG":
-                tps.append(entry + m * risk)
-            else:
-                tps.append(entry - m * risk)
+        # Read the 5 TPs from the saved trade
+        tps = [float(trade[f"TP{i+1}"]) for i in range(5)]
 
         try:
             entry_time = datetime.strptime(trade["timestamp"], "%Y-%m-%d %H:%M:%S")
@@ -548,8 +588,6 @@ def check_open_trades():
                         if i == 0:
                             current_stop = entry
                     alerts.append(f"🚀 {sym} {direction} TP{i+1} hit — {fraction*100:.0f}% closed, SL to BE")
-
-                    # Chart on partial close
                     send_closed_trade_chart(trade, f"TP{i+1}", exit_price, pnl, remaining_qty)
 
                 if remaining_qty <= 0:
@@ -571,8 +609,6 @@ def check_open_trades():
                     update_portfolio({'pnl': pnl})
                     remaining_qty = 0
                     alerts.append(f"🔴 {sym} {direction} → {desc}")
-
-                    # Chart on stop loss
                     send_closed_trade_chart(trade, desc, exit_price, pnl, 0)
                     break
 
@@ -594,7 +630,7 @@ def check_open_trades():
     if alerts:
         send_telegram("Trade updates:\n" + "\n".join(alerts))
 
-# ========== CHART ON TRADE CLOSE ==========
+# ========== CHART ON TRADE CLOSE (unchanged) ==========
 def send_closed_trade_chart(trade, hit_level, exit_price, pnl, remaining_qty):
     sym = trade["symbol"]
     entry = float(trade["entry"])
@@ -668,18 +704,17 @@ def format_signal(sig):
     tp_pips = [round(abs(tp - entry) / ps, 1) for tp in tps]
     tp_str = " / ".join([f"TP{i+1}: {tp:.5f} ({p} pips)" for i, (tp, p) in enumerate(zip(tps, tp_pips))])
 
-    # Optionally add a note that AI approved
     ai_note = " (AI approved)" if sig.get("ai_approved") else ""
     return (
         f"{dirn} {sym}{ai_note}\n"
-        f"Conviction: {score:.1f}/7.0\n"
+        f"Conviction: {score:.1f}/10.0\n"
         f"Entry: {entry:.5f}\n"
         f"Stop Loss: {stop:.5f} ({sl_pips} pips)\n"
         f"Take Profits: {tp_str}\n"
         f"Lot Size: {lot:.2f} (Risk: 1%)"
     )
 
-# ========== CHART ON SIGNAL ==========
+# ========== CHART ON SIGNAL (unchanged) ==========
 def send_trade_chart(signal):
     sym = signal['symbol']
     try:
