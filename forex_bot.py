@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-High‑Winrate Forex Swing Bot – TP1 Optimized (0.4× risk, momentum filtered)
-5 TPs (0.4/0.8/1.2/1.6/2.0) + AI gate + Charts + Alerts
-Stop Loss: 8‑30 pips, anchored to swing level.
+High‑Winrate Forex Swing Bot – TP1 Optimized (0.5R), 5 TPs: 0.5/1/2/3/5R
+1h micro‑trend + relaxed momentum for maximum TP1 hit rate.
 """
 
 import requests, json, os, traceback
@@ -227,7 +226,7 @@ def support_resistance_levels(df, lookback=20):
     low = recent['Low'].min()
     return high, low
 
-# ========== MULTI‑LAYER SCORING (with TP1‑focused improvements) ==========
+# ========== MULTI‑LAYER SCORING (TP1 optimized) ==========
 def score_pair(pair):
     df_d = get_data(pair, interval='1d', days=90)
     if df_d.empty or len(df_d) < 50:
@@ -237,14 +236,13 @@ def score_pair(pair):
     if df_4h.empty or len(df_4h) < 50:
         return 0, None, None, None, None
 
-    # 1h data for momentum checks
     df_1h = get_data(pair, interval='1h', days=3)
     if df_1h.empty or len(df_1h) < 10:
         return 0, None, None, None, None
 
     price = df_4h['Close'].iloc[-1]
 
-    # Daily trend (unchanged)
+    # Daily trend
     ema50_d = ema(df_d['Close'], 50)
     ema200_d = ema(df_d['Close'], 200)
     trend_daily = 0
@@ -264,9 +262,10 @@ def score_pair(pair):
     atr_val = atr(df_4h)
     res, sup = support_resistance_levels(df_4h, 20)
 
-    # 1h momentum indicators (TP1 boosters)
+    # 1h momentum
     rsi_1h = rsi(df_1h, 14)
     last_candle = df_1h.iloc[-1]
+    prev_candle = df_1h.iloc[-2]
     candle_range = last_candle['High'] - last_candle['Low']
     if candle_range > 0:
         bullish_momentum = (last_candle['Close'] - last_candle['Open']) / candle_range
@@ -295,7 +294,7 @@ def score_pair(pair):
 
     direction = "LONG" if trend_daily == 1 else "SHORT"
 
-    # Standard layers (unchanged)
+    # Standard layers
     if direction == "LONG":
         ema_align = price > ema50_4h.iloc[-1] and ema50_4h.iloc[-1] > ema200_4h.iloc[-1]
     else:
@@ -322,24 +321,30 @@ def score_pair(pair):
     vol_score = bool_score(vol_surge)
     dxy_score = bool_score(dxy_aligned)
 
-    # New TP1‑optimized layers
+    # TP1-optimized layers
     if direction == "LONG":
-        candle_momentum_ok = bullish_momentum > 0.5   # at least 50% of candle is bullish body
-        rsi_1h_ok = rsi_1h < 65                        # not overbought
+        candle_momentum_ok = bullish_momentum > 0.4      # relaxed from 0.5
+        rsi_1h_ok = rsi_1h < 65
+        # 1h micro‑trend: last two candles both closed higher than open
+        micro_trend_ok = last_candle['Close'] > last_candle['Open'] and \
+                         prev_candle['Close'] > prev_candle['Open']
     else:
-        candle_momentum_ok = bullish_momentum < -0.5
-        rsi_1h_ok = rsi_1h > 35                        # not oversold
+        candle_momentum_ok = bullish_momentum < -0.4
+        rsi_1h_ok = rsi_1h > 35
+        micro_trend_ok = last_candle['Close'] < last_candle['Open'] and \
+                         prev_candle['Close'] < prev_candle['Open']
 
     candle_score = bool_score(candle_momentum_ok)
     rsi_1h_score = bool_score(rsi_1h_ok)
+    micro_trend_score = bool_score(micro_trend_ok)   # new layer
 
-    # Minimum ATR floor: we want at least 10 pips for the 4h candle to make TP1 achievable
+    # Minimum ATR floor
     min_atr_pips = 10
     atr_pips = atr_val / pip_scale(pair)
     atr_ok = atr_pips >= min_atr_pips
     atr_score = bool_score(atr_ok)
 
-    # Combine all layers (weights adjusted to include new ones)
+    # Total score (new weights)
     total = (
         ema_score * 2.0 +
         adx_score * 1.5 +
@@ -348,20 +353,22 @@ def score_pair(pair):
         sr_score * 1.0 +
         vol_score * 0.5 +
         dxy_score * 0.5 +
-        candle_score * 1.5 +    # new: 1h momentum
-        rsi_1h_score * 1.0 +    # new: 1h RSI not extreme
-        atr_score * 1.0         # new: enough volatility
+        candle_score * 1.5 +
+        rsi_1h_score * 1.0 +
+        atr_score * 1.0 +
+        micro_trend_score * 1.5   # micro-trend
     )
 
-    if total < 7.0:   # raised threshold to 7.0 because we added 3.5 points possible
+    # Threshold lowered to 6.5 (max 13.0) to keep frequency after adding micro-trend
+    if total < 6.5:
         return 0, None, None, None, None
 
     return total, direction, price, atr_val, (sup if direction == "LONG" else res)
 
-# ========== AI CONFIRMATION GATE (unchanged) ==========
+# ========== AI CONFIRMATION GATE ==========
 def ai_confirm_trade(signal_dict):
     if not GROQ_API_KEY:
-        return True   # skip if no key
+        return True
     sym = signal_dict["symbol"]
     direction = signal_dict["action"]
     entry = signal_dict["limit_price"]
@@ -374,8 +381,8 @@ def ai_confirm_trade(signal_dict):
         f"Direction: {direction}\n"
         f"Entry: {entry:.5f}\n"
         f"Stop Loss: {stop:.5f}\n"
-        f"Technical Conviction Score: {score:.1f}/10.0\n\n"
-        f"Will this trade likely hit TP1 (a small target of ~0.4x the stop distance) before hitting the stop? "
+        f"Technical Conviction Score: {score:.1f}/13.0\n\n"
+        f"Will this trade likely hit TP1 (0.5x the stop distance) before hitting the stop? "
         f"Answer with exactly one word: PASS or FAIL."
     )
 
@@ -404,7 +411,7 @@ def ai_confirm_trade(signal_dict):
         pass
     return True
 
-# ========== SIGNAL GENERATION (TP1 = 0.4R exactly) ==========
+# ========== SIGNAL GENERATION (TPs: 0.5/1/2/3/5R) ==========
 def generate_signal():
     open_symbols = set()
     try:
@@ -419,7 +426,7 @@ def generate_signal():
         if pair in open_symbols:
             continue
         score, direction, price, atr_val, swing_level = score_pair(pair)
-        if direction and score >= 7.0:
+        if direction and score >= 6.5:
             candidates.append((pair, score, direction, price, atr_val, swing_level))
 
     if not candidates:
@@ -454,8 +461,8 @@ def generate_signal():
     stop = round(stop, 6)
     risk = abs(price - stop)
 
-    # TP multipliers: 0.4, 0.8, 1.2, 1.6, 2.0 × risk
-    tp_multipliers = [0.4, 0.8, 1.2, 1.6, 2.0]
+    # New TP multipliers: 0.5, 1, 2, 3, 5 × risk
+    tp_multipliers = [0.5, 1.0, 2.0, 3.0, 5.0]
     tps = []
     for m in tp_multipliers:
         if direction == "LONG":
@@ -487,7 +494,7 @@ def generate_signal():
     signal["ai_approved"] = True
     return signal
 
-# ========== TRADE MANAGEMENT (unchanged, uses 5 TPs from signal) ==========
+# ========== TRADE MANAGEMENT ==========
 def check_open_trades():
     try:
         open_df = pd.read_csv(OPEN_TRADES_CSV)
@@ -517,9 +524,7 @@ def check_open_trades():
         stop_orig = float(trade["stop"])
         original_qty = float(trade.get("original_qty", trade.get("quantity", 0)))
         remaining_qty = float(trade.get("quantity", original_qty))
-        risk = abs(entry - stop_orig)
 
-        # Read the 5 TPs from the saved trade
         tps = [float(trade[f"TP{i+1}"]) for i in range(5)]
 
         try:
@@ -618,7 +623,7 @@ def check_open_trades():
     if alerts:
         send_telegram("Trade updates:\n" + "\n".join(alerts))
 
-# ========== CHART ON TRADE CLOSE (unchanged) ==========
+# ========== CHART ON TRADE CLOSE ==========
 def send_closed_trade_chart(trade, hit_level, exit_price, pnl, remaining_qty):
     sym = trade["symbol"]
     entry = float(trade["entry"])
@@ -695,14 +700,14 @@ def format_signal(sig):
     ai_note = " (AI approved)" if sig.get("ai_approved") else ""
     return (
         f"{dirn} {sym}{ai_note}\n"
-        f"Conviction: {score:.1f}/10.0\n"
+        f"Conviction: {score:.1f}/13.0\n"
         f"Entry: {entry:.5f}\n"
         f"Stop Loss: {stop:.5f} ({sl_pips} pips)\n"
         f"Take Profits: {tp_str}\n"
         f"Lot Size: {lot:.2f} (Risk: 1%)"
     )
 
-# ========== CHART ON SIGNAL (unchanged) ==========
+# ========== CHART ON SIGNAL ==========
 def send_trade_chart(signal):
     sym = signal['symbol']
     try:
