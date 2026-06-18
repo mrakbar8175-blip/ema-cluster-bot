@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-High‑Winrate Forex Swing Bot – TP1 Optimized (0.5R), 5 TPs: 0.5/1/2/3/5R
-1h micro‑trend + relaxed momentum for maximum TP1 hit rate.
+High‑Winrate Forex Swing Bot – TP1 1R, TPs: 1/2/3/4/5R
+Breakout + micro‑trend layers, strict threshold, Telegram data health warnings.
 """
 
 import requests, json, os, traceback
@@ -226,19 +226,24 @@ def support_resistance_levels(df, lookback=20):
     low = recent['Low'].min()
     return high, low
 
-# ========== MULTI‑LAYER SCORING (TP1 optimized) ==========
+# ========== MULTI‑LAYER SCORING (1R TP1 optimized, returns warnings) ==========
 def score_pair(pair):
+    warnings = []
+
     df_d = get_data(pair, interval='1d', days=90)
     if df_d.empty or len(df_d) < 50:
-        return 0, None, None, None, None
+        warnings.append(f"{pair}: insufficient daily data ({len(df_d)} candles)")
+        return 0, None, None, None, None, warnings
 
     df_4h = get_data(pair, interval='4h', days=14)
     if df_4h.empty or len(df_4h) < 50:
-        return 0, None, None, None, None
+        warnings.append(f"{pair}: insufficient 4h data ({len(df_4h)} candles)")
+        return 0, None, None, None, None, warnings
 
     df_1h = get_data(pair, interval='1h', days=3)
     if df_1h.empty or len(df_1h) < 10:
-        return 0, None, None, None, None
+        warnings.append(f"{pair}: insufficient 1h data ({len(df_1h)} candles)")
+        return 0, None, None, None, None, warnings
 
     price = df_4h['Close'].iloc[-1]
 
@@ -251,7 +256,7 @@ def score_pair(pair):
     elif price < ema50_d.iloc[-1] and ema50_d.iloc[-1] < ema200_d.iloc[-1]:
         trend_daily = -1
     if trend_daily == 0:
-        return 0, None, None, None, None
+        return 0, None, None, None, None, warnings
 
     # 4h indicators
     ema50_4h = ema(df_4h['Close'], 50)
@@ -272,6 +277,12 @@ def score_pair(pair):
     else:
         bullish_momentum = 0
 
+    # Breakout layer
+    last_5_highs = df_1h['High'].iloc[-6:-1].max()
+    last_5_lows = df_1h['Low'].iloc[-6:-1].min()
+    breakout_long = price > last_5_highs
+    breakout_short = price < last_5_lows
+
     # Volume
     vol_last = df_4h['Volume'].iloc[-1]
     vol_avg = df_4h['Volume'].iloc[-6:-1].mean() if len(df_4h) >= 6 else vol_last
@@ -280,7 +291,9 @@ def score_pair(pair):
     # DXY
     dxy_df = get_dxy(interval='4h', days=14)
     dxy_aligned = False
-    if not dxy_df.empty:
+    if dxy_df.empty:
+        warnings.append("DXY data unavailable – intermarket layer skipped")
+    else:
         dxy_ema50 = ema(dxy_df['Close'], 50)
         dxy_trend_up = dxy_df['Close'].iloc[-1] > dxy_ema50.iloc[-1]
         quote = pair[3:]
@@ -321,22 +334,24 @@ def score_pair(pair):
     vol_score = bool_score(vol_surge)
     dxy_score = bool_score(dxy_aligned)
 
-    # TP1-optimized layers
+    # 1h micro-trend & momentum
     if direction == "LONG":
-        candle_momentum_ok = bullish_momentum > 0.4      # relaxed from 0.5
+        candle_momentum_ok = bullish_momentum > 0.4
         rsi_1h_ok = rsi_1h < 65
-        # 1h micro‑trend: last two candles both closed higher than open
         micro_trend_ok = last_candle['Close'] > last_candle['Open'] and \
                          prev_candle['Close'] > prev_candle['Open']
+        breakout_ok = breakout_long
     else:
         candle_momentum_ok = bullish_momentum < -0.4
         rsi_1h_ok = rsi_1h > 35
         micro_trend_ok = last_candle['Close'] < last_candle['Open'] and \
                          prev_candle['Close'] < prev_candle['Open']
+        breakout_ok = breakout_short
 
     candle_score = bool_score(candle_momentum_ok)
     rsi_1h_score = bool_score(rsi_1h_ok)
-    micro_trend_score = bool_score(micro_trend_ok)   # new layer
+    micro_trend_score = bool_score(micro_trend_ok)
+    breakout_score = bool_score(breakout_ok)
 
     # Minimum ATR floor
     min_atr_pips = 10
@@ -344,26 +359,25 @@ def score_pair(pair):
     atr_ok = atr_pips >= min_atr_pips
     atr_score = bool_score(atr_ok)
 
-    # Total score (new weights)
     total = (
         ema_score * 2.0 +
         adx_score * 1.5 +
         rsi_score * 1.5 +
         macd_score * 1.0 +
         sr_score * 1.0 +
-        vol_score * 0.5 +
-        dxy_score * 0.5 +
+        vol_score * 0.2 +
+        dxy_score * 0.2 +
         candle_score * 1.5 +
         rsi_1h_score * 1.0 +
         atr_score * 1.0 +
-        micro_trend_score * 1.5   # micro-trend
+        micro_trend_score * 1.5 +
+        breakout_score * 1.5
     )
 
-    # Threshold lowered to 6.5 (max 13.0) to keep frequency after adding micro-trend
-    if total < 6.5:
-        return 0, None, None, None, None
+    if total < 7.0:
+        return 0, None, None, None, None, warnings
 
-    return total, direction, price, atr_val, (sup if direction == "LONG" else res)
+    return total, direction, price, atr_val, (sup if direction == "LONG" else res), warnings
 
 # ========== AI CONFIRMATION GATE ==========
 def ai_confirm_trade(signal_dict):
@@ -381,8 +395,8 @@ def ai_confirm_trade(signal_dict):
         f"Direction: {direction}\n"
         f"Entry: {entry:.5f}\n"
         f"Stop Loss: {stop:.5f}\n"
-        f"Technical Conviction Score: {score:.1f}/13.0\n\n"
-        f"Will this trade likely hit TP1 (0.5x the stop distance) before hitting the stop? "
+        f"Technical Conviction Score: {score:.1f}/15.9\n\n"
+        f"Will this trade likely hit TP1 (1x the stop distance) before hitting the stop? "
         f"Answer with exactly one word: PASS or FAIL."
     )
 
@@ -411,7 +425,7 @@ def ai_confirm_trade(signal_dict):
         pass
     return True
 
-# ========== SIGNAL GENERATION (TPs: 0.5/1/2/3/5R) ==========
+# ========== SIGNAL GENERATION ==========
 def generate_signal():
     open_symbols = set()
     try:
@@ -422,15 +436,18 @@ def generate_signal():
         pass
 
     candidates = []
+    all_warnings = []
+
     for pair in FOREX_PAIRS:
         if pair in open_symbols:
             continue
-        score, direction, price, atr_val, swing_level = score_pair(pair)
-        if direction and score >= 6.5:
+        score, direction, price, atr_val, swing_level, warnings = score_pair(pair)
+        all_warnings.extend(warnings)
+        if direction and score >= 7.0:
             candidates.append((pair, score, direction, price, atr_val, swing_level))
 
     if not candidates:
-        return None
+        return None, all_warnings
 
     candidates.sort(key=lambda x: x[1], reverse=True)
     best = candidates[0]
@@ -461,8 +478,8 @@ def generate_signal():
     stop = round(stop, 6)
     risk = abs(price - stop)
 
-    # New TP multipliers: 0.5, 1, 2, 3, 5 × risk
-    tp_multipliers = [0.5, 1.0, 2.0, 3.0, 5.0]
+    # TP multipliers exactly as requested
+    tp_multipliers = [1.0, 2.0, 3.0, 4.0, 5.0]
     tps = []
     for m in tp_multipliers:
         if direction == "LONG":
@@ -489,10 +506,10 @@ def generate_signal():
 
     if not ai_confirm_trade(signal):
         print(f"AI rejected {pair} {direction} (score {score:.1f})")
-        return None
+        return None, all_warnings
 
     signal["ai_approved"] = True
-    return signal
+    return signal, all_warnings
 
 # ========== TRADE MANAGEMENT ==========
 def check_open_trades():
@@ -700,7 +717,7 @@ def format_signal(sig):
     ai_note = " (AI approved)" if sig.get("ai_approved") else ""
     return (
         f"{dirn} {sym}{ai_note}\n"
-        f"Conviction: {score:.1f}/13.0\n"
+        f"Conviction: {score:.1f}/15.9\n"
         f"Entry: {entry:.5f}\n"
         f"Stop Loss: {stop:.5f} ({sl_pips} pips)\n"
         f"Take Profits: {tp_str}\n"
@@ -774,10 +791,15 @@ def main():
         check_open_trades()
 
         if daily_pnl() <= portfolio['daily_loss_limit']:
-            send_telegram("Daily loss limit reached. No new trades today.")
+            send_telegram("⚠️ Daily loss limit reached. No new trades today.")
             return
 
-        sig = generate_signal()
+        sig, warnings = generate_signal()
+
+        if warnings:
+            warn_msg = "⚠️ Data warnings:\n" + "\n".join(warnings)
+            send_telegram(warn_msg)
+
         if sig:
             log_signal(sig)
             add_open_trade(sig)
@@ -787,6 +809,7 @@ def main():
             send_trade_chart(sig)
         else:
             send_telegram("HOLD – No high‑conviction setup found.")
+
     except Exception as e:
         err = f"Bot crashed: {traceback.format_exc()[:500]}"
         print(err)
