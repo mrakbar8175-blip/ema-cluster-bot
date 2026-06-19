@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-High‑Winrate Forex Swing Bot – TP1 1R, TPs: 1/2/3/4/5R
-Enhancements: News/session filter, correlation filter, regime detection.
-All layers realistic, no cheating.
+Expectancy‑Maximised Forex Swing Bot – TP1 1R, TPs: 1/2/3/4/5R
+Optimised TP fractions, breakout close mandatory, trailing stop, score /10.
 """
 
 import requests, json, os, traceback
@@ -28,7 +27,6 @@ FOREX_PAIRS = [
     "USDMXN","USDTRY","USDZAR","USDHKD","USDSGD",
     "USDNOK","USDSEK","USDDKK","USDPLN",
     "USDTHB","USDHUF","USDILS","USDCZK",
-    # USDCLP and USDCNH removed to avoid data warnings – you can re-add if needed
     "USDPHP","USDIDR","USDINR","USDKRW",
     "USDMYR","USDTWD",
     "EURMXN","EURTRY","EURZAR","EURNOK","EURSEK",
@@ -183,27 +181,20 @@ def get_dxy(interval='4h', days=14):
     return pd.DataFrame()
 
 # ========== NEWS / SESSION FILTER ==========
-# Hard‑coded list of major news events (UTC times, format: (month, day, hour, minute))
-# You can update this list manually from ForexFactory.
 HIGH_IMPACT_NEWS = [
-    # Example: Non-Farm Payrolls (first Friday of each month, 13:30 UTC)
-    # (6, 6, 13, 30),  # placeholder – fill with real dates if desired
-    # FOMC (approx. 14:00 UTC on announcement days)
-    # CPI (approx. 13:30 UTC on announcement days)
+    # (month, day, hour, minute) – add real dates if desired
 ]
 
 def is_major_news_nearby(now=None):
-    """Return True if the current time is within 2 hours of a high-impact event."""
     if now is None:
         now = datetime.utcnow()
     for (m, d, h, mi) in HIGH_IMPACT_NEWS:
         event_time = datetime(now.year, m, d, h, mi)
-        if abs((now - event_time).total_seconds()) < 7200:  # 2 hours
+        if abs((now - event_time).total_seconds()) < 7200:
             return True
     return False
 
 def is_good_session(now=None):
-    """Only trade during London/NY overlap (08:00–16:00 UTC)."""
     if now is None:
         now = datetime.utcnow()
     hour = now.hour
@@ -218,10 +209,6 @@ def session_ok():
 
 # ========== CORRELATION FILTER ==========
 def correlation_ok(pair, direction):
-    """
-    Check that closely related pairs move in the same direction.
-    If not, we are in a risk‑off / choppy environment – skip.
-    """
     cousins = {
         "EURUSD": ["GBPUSD", "EURGBP"],
         "GBPUSD": ["EURUSD", "EURGBP"],
@@ -232,18 +219,14 @@ def correlation_ok(pair, direction):
         "USDJPY": ["EURJPY", "GBPJPY"],
         "EURJPY": ["USDJPY", "GBPJPY"],
         "GBPJPY": ["USDJPY", "EURJPY"],
-        # extend for others as needed
     }
     relevant = cousins.get(pair, [pair])
-    # Get 4h data for the pair and its cousins
     dfs = {}
     for sym in relevant:
         df = get_data(sym, interval='4h', days=5)
         if df.empty:
-            return True, None  # can't verify, allow
-        dfs[sym] = df['Close'].pct_change().iloc[-4:].mean()  # average recent return
-
-    # Direction check
+            return True, None
+        dfs[sym] = df['Close'].pct_change().iloc[-4:].mean()
     for sym in relevant:
         if (direction == "LONG" and dfs[sym] < 0) or (direction == "SHORT" and dfs[sym] > 0):
             return False, f"Correlation failed: {pair} {direction} but {sym} moving opposite"
@@ -251,14 +234,19 @@ def correlation_ok(pair, direction):
 
 # ========== REGIME DETECTION ==========
 def is_strong_trend(df_4h):
-    """Return True if ADX > 25 and 50 EMA slope > 0 (up) or < 0 (down) over last 10 candles."""
     closes = df_4h['Close']
     ema50 = ema(closes, 50)
     if len(ema50) < 10:
         return False
     slope = ema50.iloc[-1] - ema50.iloc[-10]
-    adx_val, _, _ = adx(df_4h)
-    return adx_val > 25 and abs(slope) > 0.0001  # minimal slope threshold
+    adx_val, di_plus, di_minus = adx(df_4h)
+    # Strong trend: ADX ≥ 30, DI spread ≥ 5
+    if adx_val < 30:
+        return False
+    spread = abs(di_plus - di_minus)
+    if spread < 5:
+        return False
+    return abs(slope) > 0.0001
 
 # ========== TECHNICAL INDICATORS ==========
 def ema(series, period):
@@ -306,7 +294,7 @@ def support_resistance_levels(df, lookback=20):
     low = recent['Low'].min()
     return high, low
 
-# ========== MULTI‑LAYER SCORING (1R TP1 optimized, with new filters) ==========
+# ========== MULTI‑LAYER SCORING (Expectancy optimised, score /10) ==========
 def score_pair(pair):
     warnings = []
 
@@ -338,9 +326,21 @@ def score_pair(pair):
     if trend_daily == 0:
         return 0, None, None, None, None, warnings
 
-    # Regime detection
+    # Regime detection (ADX>=30, DI spread >=5, EMA slope)
     if not is_strong_trend(df_4h):
-        return 0, None, None, None, None, warnings  # skip weak/ranging markets
+        return 0, None, None, None, None, warnings
+
+    # Breakout close mandatory
+    recent_10_high = df_4h['High'].iloc[-11:-1].max()
+    recent_10_low = df_4h['Low'].iloc[-11:-1].min()
+    breakout_long = price > recent_10_high
+    breakout_short = price < recent_10_low
+
+    direction = "LONG" if trend_daily == 1 else "SHORT"
+    if direction == "LONG" and not breakout_long:
+        return 0, None, None, None, None, warnings  # no breakout
+    if direction == "SHORT" and not breakout_short:
+        return 0, None, None, None, None, warnings
 
     # 4h indicators
     ema50_4h = ema(df_4h['Close'], 50)
@@ -360,12 +360,6 @@ def score_pair(pair):
         bullish_momentum = (last_candle['Close'] - last_candle['Open']) / candle_range
     else:
         bullish_momentum = 0
-
-    # Breakout layer
-    last_5_highs = df_1h['High'].iloc[-6:-1].max()
-    last_5_lows = df_1h['Low'].iloc[-6:-1].min()
-    breakout_long = price > last_5_highs
-    breakout_short = price < last_5_lows
 
     # Volume
     vol_last = df_4h['Volume'].iloc[-1]
@@ -389,8 +383,6 @@ def score_pair(pair):
     def bool_score(cond):
         return 1 if cond else 0
 
-    direction = "LONG" if trend_daily == 1 else "SHORT"
-
     # Standard layers
     if direction == "LONG":
         ema_align = price > ema50_4h.iloc[-1] and ema50_4h.iloc[-1] > ema200_4h.iloc[-1]
@@ -398,7 +390,7 @@ def score_pair(pair):
         ema_align = price < ema50_4h.iloc[-1] and ema50_4h.iloc[-1] < ema200_4h.iloc[-1]
     ema_score = bool_score(ema_align)
 
-    adx_trending = adx_val > 25  # increased from 20
+    adx_trending = adx_val >= 30  # already ensured, but for scoring
     adx_dir = (di_plus > di_minus) if direction == "LONG" else (di_minus > di_plus)
     adx_score = bool_score(adx_trending and adx_dir)
 
@@ -424,18 +416,16 @@ def score_pair(pair):
         rsi_1h_ok = rsi_1h < 65
         micro_trend_ok = last_candle['Close'] > last_candle['Open'] and \
                          prev_candle['Close'] > prev_candle['Open']
-        breakout_ok = breakout_long
     else:
         candle_momentum_ok = bullish_momentum < -0.4
         rsi_1h_ok = rsi_1h > 35
         micro_trend_ok = last_candle['Close'] < last_candle['Open'] and \
                          prev_candle['Close'] < prev_candle['Open']
-        breakout_ok = breakout_short
 
     candle_score = bool_score(candle_momentum_ok)
     rsi_1h_score = bool_score(rsi_1h_ok)
     micro_trend_score = bool_score(micro_trend_ok)
-    breakout_score = bool_score(breakout_ok)
+    # Note: breakout is mandatory, so it's not scored again; it's a gate.
 
     # Minimum ATR floor
     min_atr_pips = 10
@@ -443,7 +433,10 @@ def score_pair(pair):
     atr_ok = atr_pips >= min_atr_pips
     atr_score = bool_score(atr_ok)
 
-    total = (
+    # Raw total (same weights as before) – max possible = 2.0+1.5+1.5+1.0+1.0+0.2+0.2+1.5+1.0+1.0+1.5 = 13.4?
+    # Let's sum: ema 2, adx 1.5, rsi 1.5, macd 1, sr 1, vol 0.2, dxy 0.2, candle 1.5, rsi1h 1.0, atr 1.0, micro 1.5 = 13.4
+    # We'll scale to 10 by multiplying by 10/13.4 ≈ 0.7463
+    raw_total = (
         ema_score * 2.0 +
         adx_score * 1.5 +
         rsi_score * 1.5 +
@@ -454,14 +447,16 @@ def score_pair(pair):
         candle_score * 1.5 +
         rsi_1h_score * 1.0 +
         atr_score * 1.0 +
-        micro_trend_score * 1.5 +
-        breakout_score * 1.5
+        micro_trend_score * 1.5
     )
+    max_raw = 13.4
+    score = round((raw_total / max_raw) * 10.0, 1)
 
-    if total < 7.0:
+    # Threshold: equivalent to raw 7.0/13.4 ≈ 5.22 → but we'll use a minimum of 5.5 to keep quality
+    if score < 5.5:
         return 0, None, None, None, None, warnings
 
-    return total, direction, price, atr_val, (sup if direction == "LONG" else res), warnings
+    return score, direction, price, atr_val, (sup if direction == "LONG" else res), warnings
 
 # ========== AI CONFIRMATION GATE ==========
 def ai_confirm_trade(signal_dict):
@@ -479,7 +474,7 @@ def ai_confirm_trade(signal_dict):
         f"Direction: {direction}\n"
         f"Entry: {entry:.5f}\n"
         f"Stop Loss: {stop:.5f}\n"
-        f"Technical Conviction Score: {score:.1f}/15.9\n\n"
+        f"Technical Conviction Score: {score:.1f}/10.0\n\n"
         f"Will this trade likely hit TP1 (1x the stop distance) before hitting the stop? "
         f"Answer with exactly one word: PASS or FAIL."
     )
@@ -509,9 +504,8 @@ def ai_confirm_trade(signal_dict):
         pass
     return True
 
-# ========== SIGNAL GENERATION (with session & correlation filters) ==========
+# ========== SIGNAL GENERATION ==========
 def generate_signal():
-    # Session / news check
     sess_ok, sess_reason = session_ok()
     if not sess_ok:
         return None, [f"Session/news filter: {sess_reason}"]
@@ -532,8 +526,7 @@ def generate_signal():
             continue
         score, direction, price, atr_val, swing_level, warnings = score_pair(pair)
         all_warnings.extend(warnings)
-        if direction and score >= 7.0:
-            # Correlation filter
+        if direction and score >= 5.5:
             cor_ok, cor_reason = correlation_ok(pair, direction)
             if not cor_ok:
                 all_warnings.append(f"Correlation skip: {cor_reason}")
@@ -604,7 +597,7 @@ def generate_signal():
     signal["ai_approved"] = True
     return signal, all_warnings
 
-# ========== TRADE MANAGEMENT ==========
+# ========== TRADE MANAGEMENT (with trailing stop after TP2) ==========
 def check_open_trades():
     try:
         open_df = pd.read_csv(OPEN_TRADES_CSV)
@@ -625,7 +618,8 @@ def check_open_trades():
     still_open = []
     alerts = []
     now = datetime.now()
-    fractions = [0.20, 0.20, 0.20, 0.20, 0.20]
+    # New fractions: 30% TP1, 10% TP2, 10% TP3, 10% TP4, 40% TP5
+    fractions = [0.30, 0.10, 0.10, 0.10, 0.40]
 
     for idx, trade in open_df.iterrows():
         sym = trade["symbol"]
@@ -649,7 +643,15 @@ def check_open_trades():
             continue
 
         highest_tp_idx = int(trade.get("highest_tp", -1))
-        current_stop = entry if highest_tp_idx >= 0 else stop_orig
+        # current_stop starts as original stop, then after TP1 becomes entry, after TP2 becomes TP1, etc.
+        current_stop = stop_orig
+        if highest_tp_idx >= 0:
+            current_stop = entry  # TP1 hit -> BE
+        if highest_tp_idx >= 1:
+            current_stop = tps[0]  # TP2 hit -> lock 1R
+        if highest_tp_idx >= 2:
+            current_stop = tps[1]  # TP3 hit -> lock 2R
+        # etc. but we'll handle incrementally
 
         for candle_time, candle in df_1h.iterrows():
             high = candle['High']
@@ -688,9 +690,13 @@ def check_open_trades():
                         update_portfolio({'pnl': pnl})
                         remaining_qty -= exit_qty
                         highest_tp_idx = i
+                        # Update current_stop for next loop
                         if i == 0:
                             current_stop = entry
-                    alerts.append(f"🚀 {sym} {direction} TP{i+1} hit — {fraction*100:.0f}% closed, SL to BE")
+                        elif i >= 1:
+                            # lock profit: SL = TP(i)  (i-1? Actually after TP2, we want to lock 1R, so stop = TP1)
+                            current_stop = tps[i-1] if i > 0 else entry
+                    alerts.append(f"🚀 {sym} {direction} TP{i+1} hit — {fraction*100:.0f}% closed, SL to {'BE' if i==0 else f'TP{i}'}")
                     send_closed_trade_chart(trade, f"TP{i+1}", exit_price, pnl, remaining_qty)
 
                 if remaining_qty <= 0:
@@ -810,7 +816,7 @@ def format_signal(sig):
     ai_note = " (AI approved)" if sig.get("ai_approved") else ""
     return (
         f"{dirn} {sym}{ai_note}\n"
-        f"Conviction: {score:.1f}/15.9\n"
+        f"Conviction: {score:.1f}/10.0\n"
         f"Entry: {entry:.5f}\n"
         f"Stop Loss: {stop:.5f} ({sl_pips} pips)\n"
         f"Take Profits: {tp_str}\n"
