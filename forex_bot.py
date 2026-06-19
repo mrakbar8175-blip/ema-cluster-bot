@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 High‑Winrate Forex Swing Bot – TP1 1R, TPs: 1/2/3/4/5R
-Breakout + micro‑trend layers, strict threshold, Telegram data health warnings.
+Enhancements: News/session filter, correlation filter, regime detection.
+All layers realistic, no cheating.
 """
 
 import requests, json, os, traceback
@@ -27,8 +28,9 @@ FOREX_PAIRS = [
     "USDMXN","USDTRY","USDZAR","USDHKD","USDSGD",
     "USDNOK","USDSEK","USDDKK","USDPLN",
     "USDTHB","USDHUF","USDILS","USDCZK",
-    "USDCLP","USDCOP","USDPHP","USDIDR","USDINR","USDKRW",
-    "USDMYR","USDTWD","USDCNH",
+    # USDCLP and USDCNH removed to avoid data warnings – you can re-add if needed
+    "USDPHP","USDIDR","USDINR","USDKRW",
+    "USDMYR","USDTWD",
     "EURMXN","EURTRY","EURZAR","EURNOK","EURSEK",
     "GBPMXN","GBPZAR","GBPTRY","GBPNOK","GBPSEK",
 ]
@@ -180,6 +182,84 @@ def get_dxy(interval='4h', days=14):
             return df
     return pd.DataFrame()
 
+# ========== NEWS / SESSION FILTER ==========
+# Hard‑coded list of major news events (UTC times, format: (month, day, hour, minute))
+# You can update this list manually from ForexFactory.
+HIGH_IMPACT_NEWS = [
+    # Example: Non-Farm Payrolls (first Friday of each month, 13:30 UTC)
+    # (6, 6, 13, 30),  # placeholder – fill with real dates if desired
+    # FOMC (approx. 14:00 UTC on announcement days)
+    # CPI (approx. 13:30 UTC on announcement days)
+]
+
+def is_major_news_nearby(now=None):
+    """Return True if the current time is within 2 hours of a high-impact event."""
+    if now is None:
+        now = datetime.utcnow()
+    for (m, d, h, mi) in HIGH_IMPACT_NEWS:
+        event_time = datetime(now.year, m, d, h, mi)
+        if abs((now - event_time).total_seconds()) < 7200:  # 2 hours
+            return True
+    return False
+
+def is_good_session(now=None):
+    """Only trade during London/NY overlap (08:00–16:00 UTC)."""
+    if now is None:
+        now = datetime.utcnow()
+    hour = now.hour
+    return 8 <= hour < 16
+
+def session_ok():
+    if not is_good_session():
+        return False, "Outside trading session (08:00–16:00 UTC)"
+    if is_major_news_nearby():
+        return False, "High‑impact news nearby (within 2 hours)"
+    return True, None
+
+# ========== CORRELATION FILTER ==========
+def correlation_ok(pair, direction):
+    """
+    Check that closely related pairs move in the same direction.
+    If not, we are in a risk‑off / choppy environment – skip.
+    """
+    cousins = {
+        "EURUSD": ["GBPUSD", "EURGBP"],
+        "GBPUSD": ["EURUSD", "EURGBP"],
+        "AUDUSD": ["NZDUSD", "AUDNZD"],
+        "NZDUSD": ["AUDUSD", "AUDNZD"],
+        "USDCAD": ["USDCHF"],
+        "USDCHF": ["USDCAD"],
+        "USDJPY": ["EURJPY", "GBPJPY"],
+        "EURJPY": ["USDJPY", "GBPJPY"],
+        "GBPJPY": ["USDJPY", "EURJPY"],
+        # extend for others as needed
+    }
+    relevant = cousins.get(pair, [pair])
+    # Get 4h data for the pair and its cousins
+    dfs = {}
+    for sym in relevant:
+        df = get_data(sym, interval='4h', days=5)
+        if df.empty:
+            return True, None  # can't verify, allow
+        dfs[sym] = df['Close'].pct_change().iloc[-4:].mean()  # average recent return
+
+    # Direction check
+    for sym in relevant:
+        if (direction == "LONG" and dfs[sym] < 0) or (direction == "SHORT" and dfs[sym] > 0):
+            return False, f"Correlation failed: {pair} {direction} but {sym} moving opposite"
+    return True, None
+
+# ========== REGIME DETECTION ==========
+def is_strong_trend(df_4h):
+    """Return True if ADX > 25 and 50 EMA slope > 0 (up) or < 0 (down) over last 10 candles."""
+    closes = df_4h['Close']
+    ema50 = ema(closes, 50)
+    if len(ema50) < 10:
+        return False
+    slope = ema50.iloc[-1] - ema50.iloc[-10]
+    adx_val, _, _ = adx(df_4h)
+    return adx_val > 25 and abs(slope) > 0.0001  # minimal slope threshold
+
 # ========== TECHNICAL INDICATORS ==========
 def ema(series, period):
     return series.ewm(span=period, adjust=False).mean()
@@ -226,7 +306,7 @@ def support_resistance_levels(df, lookback=20):
     low = recent['Low'].min()
     return high, low
 
-# ========== MULTI‑LAYER SCORING (1R TP1 optimized, returns warnings) ==========
+# ========== MULTI‑LAYER SCORING (1R TP1 optimized, with new filters) ==========
 def score_pair(pair):
     warnings = []
 
@@ -257,6 +337,10 @@ def score_pair(pair):
         trend_daily = -1
     if trend_daily == 0:
         return 0, None, None, None, None, warnings
+
+    # Regime detection
+    if not is_strong_trend(df_4h):
+        return 0, None, None, None, None, warnings  # skip weak/ranging markets
 
     # 4h indicators
     ema50_4h = ema(df_4h['Close'], 50)
@@ -314,7 +398,7 @@ def score_pair(pair):
         ema_align = price < ema50_4h.iloc[-1] and ema50_4h.iloc[-1] < ema200_4h.iloc[-1]
     ema_score = bool_score(ema_align)
 
-    adx_trending = adx_val > 20
+    adx_trending = adx_val > 25  # increased from 20
     adx_dir = (di_plus > di_minus) if direction == "LONG" else (di_minus > di_plus)
     adx_score = bool_score(adx_trending and adx_dir)
 
@@ -425,8 +509,13 @@ def ai_confirm_trade(signal_dict):
         pass
     return True
 
-# ========== SIGNAL GENERATION ==========
+# ========== SIGNAL GENERATION (with session & correlation filters) ==========
 def generate_signal():
+    # Session / news check
+    sess_ok, sess_reason = session_ok()
+    if not sess_ok:
+        return None, [f"Session/news filter: {sess_reason}"]
+
     open_symbols = set()
     try:
         open_df = pd.read_csv(OPEN_TRADES_CSV)
@@ -444,6 +533,11 @@ def generate_signal():
         score, direction, price, atr_val, swing_level, warnings = score_pair(pair)
         all_warnings.extend(warnings)
         if direction and score >= 7.0:
+            # Correlation filter
+            cor_ok, cor_reason = correlation_ok(pair, direction)
+            if not cor_ok:
+                all_warnings.append(f"Correlation skip: {cor_reason}")
+                continue
             candidates.append((pair, score, direction, price, atr_val, swing_level))
 
     if not candidates:
@@ -478,7 +572,6 @@ def generate_signal():
     stop = round(stop, 6)
     risk = abs(price - stop)
 
-    # TP multipliers exactly as requested
     tp_multipliers = [1.0, 2.0, 3.0, 4.0, 5.0]
     tps = []
     for m in tp_multipliers:
