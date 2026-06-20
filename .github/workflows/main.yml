@@ -1,7 +1,7 @@
-name: Forex Swing Bot with AI Filter
+name: Forex Swing Bot (Discord)
 
 on:
-  workflow_dispatch:                # manual trigger only
+  workflow_dispatch:                # manual trigger
 
 jobs:
   run-bot:
@@ -10,21 +10,16 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: true
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-
       - name: Install dependencies
         run: pip install -r requirements.txt
-
       - name: Run forex bot
         env:
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          CHAT_ID: ${{ secrets.CHAT_ID }}
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}    # <-- Must be here
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}    # optional, remove if you don't want AI
         run: python forex_bot.py
-
       - name: Commit and push CSV changes
         run: |
           git config --global user.email "actions@github.com"
