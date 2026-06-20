@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Expectancy‑Maximised Forex Swing Bot – TP1 1R, TPs: 1/2/3/4/5R
-Optimised TP fractions, breakout close mandatory, trailing stop, score /10.
+High‑Winrate Forex Swing Bot – Discord Edition
+TP1 1R, TPs 1/2/3/4/5R, expectancy optimised, score /10.
 """
 
 import requests, json, os, traceback
@@ -11,8 +11,7 @@ import yfinance as yf
 from datetime import datetime, timedelta
 
 # ========== ENVIRONMENT ==========
-TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
-CHAT_ID = os.environ["CHAT_ID"]
+DISCORD_WEBHOOK_URL = os.environ["DISCORD_WEBHOOK_URL"]
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 if not GROQ_API_KEY:
     print("WARNING: GROQ_API_KEY not set – AI filtering disabled.")
@@ -181,9 +180,7 @@ def get_dxy(interval='4h', days=14):
     return pd.DataFrame()
 
 # ========== NEWS / SESSION FILTER ==========
-HIGH_IMPACT_NEWS = [
-    # (month, day, hour, minute) – add real dates if desired
-]
+HIGH_IMPACT_NEWS = []
 
 def is_major_news_nearby(now=None):
     if now is None:
@@ -240,7 +237,6 @@ def is_strong_trend(df_4h):
         return False
     slope = ema50.iloc[-1] - ema50.iloc[-10]
     adx_val, di_plus, di_minus = adx(df_4h)
-    # Strong trend: ADX ≥ 30, DI spread ≥ 5
     if adx_val < 30:
         return False
     spread = abs(di_plus - di_minus)
@@ -294,10 +290,9 @@ def support_resistance_levels(df, lookback=20):
     low = recent['Low'].min()
     return high, low
 
-# ========== MULTI‑LAYER SCORING (Expectancy optimised, score /10) ==========
+# ========== MULTI‑LAYER SCORING (score /10) ==========
 def score_pair(pair):
     warnings = []
-
     df_d = get_data(pair, interval='1d', days=90)
     if df_d.empty or len(df_d) < 50:
         warnings.append(f"{pair}: insufficient daily data ({len(df_d)} candles)")
@@ -338,7 +333,7 @@ def score_pair(pair):
 
     direction = "LONG" if trend_daily == 1 else "SHORT"
     if direction == "LONG" and not breakout_long:
-        return 0, None, None, None, None, warnings  # no breakout
+        return 0, None, None, None, None, warnings
     if direction == "SHORT" and not breakout_short:
         return 0, None, None, None, None, warnings
 
@@ -383,14 +378,13 @@ def score_pair(pair):
     def bool_score(cond):
         return 1 if cond else 0
 
-    # Standard layers
     if direction == "LONG":
         ema_align = price > ema50_4h.iloc[-1] and ema50_4h.iloc[-1] > ema200_4h.iloc[-1]
     else:
         ema_align = price < ema50_4h.iloc[-1] and ema50_4h.iloc[-1] < ema200_4h.iloc[-1]
     ema_score = bool_score(ema_align)
 
-    adx_trending = adx_val >= 30  # already ensured, but for scoring
+    adx_trending = adx_val >= 30
     adx_dir = (di_plus > di_minus) if direction == "LONG" else (di_minus > di_plus)
     adx_score = bool_score(adx_trending and adx_dir)
 
@@ -410,7 +404,6 @@ def score_pair(pair):
     vol_score = bool_score(vol_surge)
     dxy_score = bool_score(dxy_aligned)
 
-    # 1h micro-trend & momentum
     if direction == "LONG":
         candle_momentum_ok = bullish_momentum > 0.4
         rsi_1h_ok = rsi_1h < 65
@@ -425,17 +418,12 @@ def score_pair(pair):
     candle_score = bool_score(candle_momentum_ok)
     rsi_1h_score = bool_score(rsi_1h_ok)
     micro_trend_score = bool_score(micro_trend_ok)
-    # Note: breakout is mandatory, so it's not scored again; it's a gate.
 
-    # Minimum ATR floor
     min_atr_pips = 10
     atr_pips = atr_val / pip_scale(pair)
     atr_ok = atr_pips >= min_atr_pips
     atr_score = bool_score(atr_ok)
 
-    # Raw total (same weights as before) – max possible = 2.0+1.5+1.5+1.0+1.0+0.2+0.2+1.5+1.0+1.0+1.5 = 13.4?
-    # Let's sum: ema 2, adx 1.5, rsi 1.5, macd 1, sr 1, vol 0.2, dxy 0.2, candle 1.5, rsi1h 1.0, atr 1.0, micro 1.5 = 13.4
-    # We'll scale to 10 by multiplying by 10/13.4 ≈ 0.7463
     raw_total = (
         ema_score * 2.0 +
         adx_score * 1.5 +
@@ -452,7 +440,6 @@ def score_pair(pair):
     max_raw = 13.4
     score = round((raw_total / max_raw) * 10.0, 1)
 
-    # Threshold: equivalent to raw 7.0/13.4 ≈ 5.22 → but we'll use a minimum of 5.5 to keep quality
     if score < 5.5:
         return 0, None, None, None, None, warnings
 
@@ -480,10 +467,7 @@ def ai_confirm_trade(signal_dict):
     )
 
     url = "https://api.groq.com/openai/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
-        "Content-Type": "application/json"
-    }
+    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
     payload = {
         "model": "llama-3.3-70b-versatile",
         "messages": [
@@ -597,7 +581,7 @@ def generate_signal():
     signal["ai_approved"] = True
     return signal, all_warnings
 
-# ========== TRADE MANAGEMENT (with trailing stop after TP2) ==========
+# ========== TRADE MANAGEMENT (30/10/10/10/40 fractions, trailing stop) ==========
 def check_open_trades():
     try:
         open_df = pd.read_csv(OPEN_TRADES_CSV)
@@ -618,7 +602,6 @@ def check_open_trades():
     still_open = []
     alerts = []
     now = datetime.now()
-    # New fractions: 30% TP1, 10% TP2, 10% TP3, 10% TP4, 40% TP5
     fractions = [0.30, 0.10, 0.10, 0.10, 0.40]
 
     for idx, trade in open_df.iterrows():
@@ -643,15 +626,14 @@ def check_open_trades():
             continue
 
         highest_tp_idx = int(trade.get("highest_tp", -1))
-        # current_stop starts as original stop, then after TP1 becomes entry, after TP2 becomes TP1, etc.
         current_stop = stop_orig
         if highest_tp_idx >= 0:
-            current_stop = entry  # TP1 hit -> BE
+            current_stop = entry
         if highest_tp_idx >= 1:
-            current_stop = tps[0]  # TP2 hit -> lock 1R
+            current_stop = tps[0]
         if highest_tp_idx >= 2:
-            current_stop = tps[1]  # TP3 hit -> lock 2R
-        # etc. but we'll handle incrementally
+            current_stop = tps[1]
+        # subsequent locks can be added but we keep simple
 
         for candle_time, candle in df_1h.iterrows():
             high = candle['High']
@@ -690,11 +672,9 @@ def check_open_trades():
                         update_portfolio({'pnl': pnl})
                         remaining_qty -= exit_qty
                         highest_tp_idx = i
-                        # Update current_stop for next loop
                         if i == 0:
                             current_stop = entry
                         elif i >= 1:
-                            # lock profit: SL = TP(i)  (i-1? Actually after TP2, we want to lock 1R, so stop = TP1)
                             current_stop = tps[i-1] if i > 0 else entry
                     alerts.append(f"🚀 {sym} {direction} TP{i+1} hit — {fraction*100:.0f}% closed, SL to {'BE' if i==0 else f'TP{i}'}")
                     send_closed_trade_chart(trade, f"TP{i+1}", exit_price, pnl, remaining_qty)
@@ -737,7 +717,26 @@ def check_open_trades():
     save_portfolio(portfolio)
 
     if alerts:
-        send_telegram("Trade updates:\n" + "\n".join(alerts))
+        send_discord_message("Trade updates:\n" + "\n".join(alerts))
+
+# ========== DISCORD MESSAGING ==========
+def send_discord_message(text):
+    """Send a plain text message to Discord webhook."""
+    try:
+        payload = {"content": text[:2000]}  # Discord limit
+        requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=10)
+    except Exception as e:
+        print("Discord message error:", e)
+
+def send_discord_chart(chart_path, caption=""):
+    """Send an image file to Discord webhook with an optional caption."""
+    try:
+        with open(chart_path, 'rb') as f:
+            files = {"file": (os.path.basename(chart_path), f, 'image/png')}
+            payload = {"content": caption[:2000]} if caption else {}
+            requests.post(DISCORD_WEBHOOK_URL, data=payload, files=files, timeout=15)
+    except Exception as e:
+        print("Discord chart error:", e)
 
 # ========== CHART ON TRADE CLOSE ==========
 def send_closed_trade_chart(trade, hit_level, exit_price, pnl, remaining_qty):
@@ -785,43 +784,10 @@ def send_closed_trade_chart(trade, hit_level, exit_price, pnl, remaining_qty):
         fig.savefig(chart_path, dpi=150, bbox_inches='tight', facecolor='black')
         plt.close(fig)
 
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
-        with open(chart_path, 'rb') as img:
-            requests.post(url, data={'chat_id': CHAT_ID}, files={'photo': img})
+        send_discord_chart(chart_path, caption=f"{sym} {direction} – {hit_level} (PnL: {pnl:.2f}$)")
         os.remove(chart_path)
     except Exception as e:
         print(f"Closed trade chart error: {e}")
-
-# ========== TELEGRAM ==========
-def send_telegram(text):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    try:
-        requests.post(url, data={"chat_id": CHAT_ID, "text": text}, timeout=10)
-    except Exception as e:
-        print("Telegram error:", e)
-
-def format_signal(sig):
-    sym = sig["symbol"]
-    dirn = "🟢 LONG" if sig["action"] == "LONG" else "🔴 SHORT"
-    entry = sig["limit_price"]
-    stop = sig["stop_loss"]
-    tps = sig["take_profits"]
-    lot = sig["lot_size"]
-    score = sig["score"]
-    ps = pip_scale(sym)
-    sl_pips = round(abs(entry - stop) / ps, 1)
-    tp_pips = [round(abs(tp - entry) / ps, 1) for tp in tps]
-    tp_str = " / ".join([f"TP{i+1}: {tp:.5f} ({p} pips)" for i, (tp, p) in enumerate(zip(tps, tp_pips))])
-
-    ai_note = " (AI approved)" if sig.get("ai_approved") else ""
-    return (
-        f"{dirn} {sym}{ai_note}\n"
-        f"Conviction: {score:.1f}/10.0\n"
-        f"Entry: {entry:.5f}\n"
-        f"Stop Loss: {stop:.5f} ({sl_pips} pips)\n"
-        f"Take Profits: {tp_str}\n"
-        f"Lot Size: {lot:.2f} (Risk: 1%)"
-    )
 
 # ========== CHART ON SIGNAL ==========
 def send_trade_chart(signal):
@@ -873,15 +839,34 @@ def send_trade_chart(signal):
         fig.savefig(chart_path, dpi=150, bbox_inches='tight', facecolor='black')
         plt.close(fig)
 
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
-        with open(chart_path, 'rb') as img:
-            resp = requests.post(url, data={'chat_id': CHAT_ID}, files={'photo': img})
+        send_discord_chart(chart_path, caption=format_signal(signal))
         os.remove(chart_path)
     except Exception as e:
         print(f"Chart image error: {e}")
-        studies = "&studies[]=STD%3BEMA%3B50&studies[]=STD%3BVWAP"
-        tv_url = f"https://www.tradingview.com/chart/?symbol=FX:{sym}&interval=240{studies}"
-        send_telegram(f"📈 Chart unavailable – view here: {tv_url}")
+        send_discord_message(f"📈 {sym} 4h chart (EMA50 + VWAP) could not be generated. ({str(e)[:80]})")
+
+def format_signal(sig):
+    sym = sig["symbol"]
+    dirn = "🟢 LONG" if sig["action"] == "LONG" else "🔴 SHORT"
+    entry = sig["limit_price"]
+    stop = sig["stop_loss"]
+    tps = sig["take_profits"]
+    lot = sig["lot_size"]
+    score = sig["score"]
+    ps = pip_scale(sym)
+    sl_pips = round(abs(entry - stop) / ps, 1)
+    tp_pips = [round(abs(tp - entry) / ps, 1) for tp in tps]
+    tp_str = " / ".join([f"TP{i+1}: {tp:.5f} ({p} pips)" for i, (tp, p) in enumerate(zip(tps, tp_pips))])
+
+    ai_note = " (AI approved)" if sig.get("ai_approved") else ""
+    return (
+        f"{dirn} {sym}{ai_note}\n"
+        f"Conviction: {score:.1f}/10.0\n"
+        f"Entry: {entry:.5f}\n"
+        f"Stop Loss: {stop:.5f} ({sl_pips} pips)\n"
+        f"Take Profits: {tp_str}\n"
+        f"Lot Size: {lot:.2f} (Risk: 1%)"
+    )
 
 # ========== MAIN ==========
 def main():
@@ -890,29 +875,29 @@ def main():
         check_open_trades()
 
         if daily_pnl() <= portfolio['daily_loss_limit']:
-            send_telegram("⚠️ Daily loss limit reached. No new trades today.")
+            send_discord_message("⚠️ Daily loss limit reached. No new trades today.")
             return
 
         sig, warnings = generate_signal()
 
         if warnings:
             warn_msg = "⚠️ Data warnings:\n" + "\n".join(warnings)
-            send_telegram(warn_msg)
+            send_discord_message(warn_msg)
 
         if sig:
             log_signal(sig)
             add_open_trade(sig)
             portfolio['open_positions'] += 1
             save_portfolio(portfolio)
-            send_telegram(format_signal(sig))
-            send_trade_chart(sig)
+            # Send text signal and chart
+            send_trade_chart(sig)   # chart already includes caption from format_signal
         else:
-            send_telegram("HOLD – No high‑conviction setup found.")
+            send_discord_message("HOLD – No high‑conviction setup found.")
 
     except Exception as e:
         err = f"Bot crashed: {traceback.format_exc()[:500]}"
         print(err)
-        send_telegram(err)
+        send_discord_message(err)
 
 if __name__ == "__main__":
     main()
