@@ -2,7 +2,14 @@
 """
 Crypto Swing Bot – 4H, 4 TP levels (0.5/1.0/1.5/2.0R)
 Full position closed by trailing stop or final TP (2R) – no partials.
-Trailing stop moves: 0.5R → breakeven, 1.0R → 0.5R, 1.5R → 1.0R
+Added challenge features:
+- Dynamic risk scaling
+- Global drawdown stop (50% from peak)
+- Milestone lock-in (halve risk for 3 days after hitting milestones)
+- BTC storm warning (avoid trades if BTC moves >3% in 4h)
+- Higher score threshold when account < $50
+- Victory stop at $50,000
+- Signal now shows position size (USDT) and max risk (USDT)
 """
 
 import requests, json, os, traceback, math
@@ -23,12 +30,12 @@ BLACKLIST = {
 }
 
 # ========== CHALLENGE PARAMETERS ==========
-RISK_PERCENT = 0.10
 DAILY_LOSS_PCT = 0.20
 MAX_RISKY_TRADES = 2
-MIN_SCORE = 8.0
 TP_MULTIPLIER = 2.0           # final TP is 2R (TP4)
 MIN_NOTIONAL = 1.0
+PEAK_BALANCE_FILE = "peak_balance.txt"
+MILESTONE_FILE = "milestone_lock.json"
 
 # ========== DYNAMIC COIN LIST ==========
 def fetch_top_liquid_coins(limit=50):
@@ -167,6 +174,74 @@ def get_daily_start_balance():
         f.write(f"{today_str},{balance}")
     return balance
 
+# ========== GLOBAL DRAWDOWN & PEAK ==========
+def get_peak_balance():
+    if os.path.exists(PEAK_BALANCE_FILE):
+        with open(PEAK_BALANCE_FILE) as f:
+            return float(f.read().strip())
+    return portfolio['balance']
+
+def update_peak_balance():
+    peak = get_peak_balance()
+    if portfolio['balance'] > peak:
+        with open(PEAK_BALANCE_FILE, 'w') as f:
+            f.write(str(portfolio['balance']))
+
+# ========== RISK SCALING ==========
+def get_risk_percent():
+    balance = portfolio['balance']
+    # check milestone lock
+    if os.path.exists(MILESTONE_FILE):
+        with open(MILESTONE_FILE) as f:
+            lock = json.load(f)
+        if lock.get("active"):
+            unlock_time = datetime.fromisoformat(lock["unlock_time"])
+            if datetime.now() < unlock_time:
+                return lock["risk"]   # halved risk during lock
+    # normal risk scaling
+    if balance < 100:
+        return 0.10
+    elif balance < 500:
+        return 0.12
+    else:
+        return 0.15
+
+# ========== MILESTONE CELEBRATION ==========
+MILESTONES = [50, 100, 200, 500, 1000, 2000, 5000, 10000, 25000, 50000]
+
+def check_milestones(old_balance, new_balance):
+    for m in MILESTONES:
+        if old_balance < m <= new_balance:
+            # lock risk to half for 3 days
+            lock = {
+                "active": True,
+                "unlock_time": (datetime.now() + timedelta(days=3)).isoformat(),
+                "risk": get_risk_percent() * 0.5  # half current risk
+            }
+            with open(MILESTONE_FILE, 'w') as f:
+                json.dump(lock, f)
+            send_discord_message(f"🎉 Milestone ${m} reached! Risk halved for 3 days to protect gains.")
+            break
+
+# ========== BTC STORM WARNING ==========
+def btc_storm_warning():
+    btc = get_hybrid_klines("BTC-USD", '4h', days=2)
+    if btc.empty or len(btc) < 6:
+        return False, False
+    current = btc.iloc[-1]
+    previous = btc.iloc[-2]
+    change_pct = (current['Close'] - previous['Close']) / previous['Close'] * 100
+    avoid_long = change_pct < -3.0
+    avoid_short = change_pct > 3.0
+    return avoid_long, avoid_short
+
+# ========== SCORE THRESHOLD ==========
+def get_min_score():
+    if portfolio['balance'] < 50:
+        return 9.0
+    else:
+        return 8.0
+
 # ========== SYMBOL CONVERTER ==========
 def to_yahoo(sym):
     clean = sym.replace("-USD", "").replace("USDT", "").replace("-USDT", "")
@@ -302,7 +377,7 @@ def strong_support_resistance(df, direction, lookback=50, min_touches=2, toleran
         resistance = min(resistances)
         return True, resistance
 
-# ========== SCORING (same robust filters) ==========
+# ========== SCORING ==========
 def score_pair_2R(pair):
     layers = {}
     df_d = get_yahoo_klines(pair, '1d', days=90)
@@ -348,7 +423,6 @@ def score_pair_2R(pair):
     if abs(tp_final - price) > 5.5 * atr_val:
         return 0, direction, price, atr_val, None, {"2R Feasibility": (0,0,"FAIL: TP > 5.5x ATR")}
 
-    # Soft exhaustion penalty
     exhaustion_penalty = 0
     dist_ema50 = 0
     if direction == "LONG":
@@ -513,6 +587,13 @@ def generate_signal():
             open_symbols_risky = set(risky["symbol"].values)
     except: pass
 
+    # BTC storm warning
+    avoid_long, avoid_short = btc_storm_warning()
+    if avoid_long or avoid_short:
+        print(f"BTC storm warning active. avoid_long={avoid_long}, avoid_short={avoid_short}")
+
+    min_score = get_min_score()
+
     all_scored = []
     data_failures = 0
     for pair in CRYPTO_PAIRS:
@@ -520,6 +601,11 @@ def generate_signal():
         score, direction, price, atr_val, swing_level, layers = score_pair_2R(pair)
         if direction is None:
             data_failures += 1
+            continue
+        # Apply storm filter
+        if direction == "LONG" and avoid_long:
+            continue
+        if direction == "SHORT" and avoid_short:
             continue
         all_scored.append((pair, score, direction, price, atr_val, swing_level, layers))
 
@@ -529,7 +615,7 @@ def generate_signal():
 
     print(f"Scored pairs: {len(all_scored)}, data failures: {data_failures}")
 
-    candidates = [item for item in all_scored if item[1] >= MIN_SCORE]
+    candidates = [item for item in all_scored if item[1] >= min_score]
     if not candidates:
         return None, top5, top_overall[6] if top_overall else {}, data_failures, risky_count
 
@@ -547,15 +633,19 @@ def generate_signal():
             stop = max(stop, swing_level + 0.05 * atr_val)
     risk = abs(price - stop)
 
-    # ---- 4 TP levels: 0.5 / 1.0 / 1.5 / 2.0R ----
     tp_multipliers = [0.5, 1.0, 1.5, 2.0]
     take_profits = [price + m * risk if direction == "LONG" else price - m * risk for m in tp_multipliers]
-    final_tp = take_profits[-1]   # 2R
+    final_tp = take_profits[-1]
 
-    quantity = round((portfolio['balance'] * RISK_PERCENT) / risk, 8)
+    risk_percent = get_risk_percent()
+    quantity = round((portfolio['balance'] * risk_percent) / risk, 8)
     if quantity * price < MIN_NOTIONAL:
         print(f"Skipping {pair}: trade value {quantity*price:.2f} < ${MIN_NOTIONAL}")
         return None, top5, layers, data_failures, risky_count
+
+    # ---- Calculate position size and max risk for the signal ----
+    notional = quantity * price
+    max_risk_amount = quantity * risk
 
     signal = {
         "action": direction,
@@ -563,11 +653,14 @@ def generate_signal():
         "quantity": quantity,
         "limit_price": price,
         "stop_loss": stop,
-        "take_profits": take_profits,    # list of 4 prices
-        "take_profit": final_tp,         # for CSV log (2R)
+        "take_profits": take_profits,
+        "take_profit": final_tp,
         "score": score,
         "atr": atr_val,
-        "layers": layers
+        "layers": layers,
+        "risk_percent": risk_percent,
+        "notional": notional,
+        "max_risk_amount": max_risk_amount
     }
     if not ai_confirm_trade(signal):
         print(f"AI rejected {pair} {direction} (score {score:.1f})")
@@ -591,13 +684,8 @@ def send_discord_image(image_path, caption=""):
             print(f"Image sent, status: {resp.status_code}")
     except Exception as e: print("Discord image error:", e)
 
-# ========== STEPPED TRAILING STOP (4 TP) ==========
+# ========== STEPPED TRAILING STOP ==========
 def get_trailing_stop(entry, risk, direction, highest_price, lowest_price):
-    """
-    0.5R move → breakeven
-    1.0R move → stop at 0.5R
-    1.5R move → stop at 1.0R
-    """
     if direction == "LONG":
         move = highest_price - entry
         if move >= 1.5 * risk:
@@ -605,9 +693,9 @@ def get_trailing_stop(entry, risk, direction, highest_price, lowest_price):
         elif move >= 1.0 * risk:
             return entry + 0.5 * risk
         elif move >= 0.5 * risk:
-            return entry   # breakeven
+            return entry
         else:
-            return entry - risk   # original stop
+            return entry - risk
     else:
         move = entry - lowest_price
         if move >= 1.5 * risk:
@@ -830,7 +918,7 @@ def send_trade_close_chart(trade, hit_level, exit_price, pnl):
         os.remove(chart_path)
     except Exception as e: print(f"Close chart error: {e}")
 
-# ========== SIGNAL FORMATTING ==========
+# ========== SIGNAL FORMATTING (now with position size & risk) ==========
 def fmt_price(price, reference_price=None):
     if reference_price is None: reference_price = abs(price)
     if reference_price < 1: return f"{price:.5f}"
@@ -841,8 +929,9 @@ def format_signal(sig):
     sym = sig["symbol"].replace("-USD","")
     direction = sig["action"]
     entry = sig["limit_price"]; stop = sig["stop_loss"]
-    tps = sig["take_profits"]   # 4 prices
-    risk = abs(entry - stop); stop_pct = risk / entry * 100
+    tps = sig["take_profits"]
+    risk_dist = abs(entry - stop)
+    stop_pct = risk_dist / entry * 100
     icon = "🟢 LONG" if direction == "LONG" else "🔴 SHORT"
     score = sig["score"]
     layers = sig.get("layers", {})
@@ -851,9 +940,16 @@ def format_signal(sig):
         failed = [name for name, (_,_,status) in layers.items() if "FAIL" in status]
         if failed: fail_warning = f" ⚠️ Data: {', '.join(failed)}"
     tp_str = " / ".join([fmt_price(tp, entry) for tp in tps])
+
+    # New fields
+    notional = sig.get("notional", 0)
+    max_risk = sig.get("max_risk_amount", 0)
+
     return (f"${sym} – {icon} Setup (4H) | Score: {score:.1f}/{11.5}\n"
             f"Entry: {fmt_price(entry, entry)} | Stop: {fmt_price(stop, entry)} (-{stop_pct:.2f}%)\n"
-            f"TPs (0.5/1.0/1.5/2.0R): {tp_str}{fail_warning}")
+            f"TPs (0.5/1.0/1.5/2.0R): {tp_str}\n"
+            f"💰 Position: {notional:.2f} USDT | Max Risk: {max_risk:.2f} USDT"
+            f"{fail_warning}")
 
 # ========== HOLD MESSAGE ==========
 def format_hold_message(top5, top_layers, skipped=0, risky_limit=False):
@@ -863,7 +959,8 @@ def format_hold_message(top5, top_layers, skipped=0, risky_limit=False):
         return f"HOLD – No valid setups (all {skipped} coins failed data fetch)."
     lines = []
     top_score = top5[0][1]
-    if top_score < MIN_SCORE:
+    min_score = get_min_score()
+    if top_score < min_score:
         lines.append("HOLD – No high‑conviction setup found.")
     else:
         lines.append("HOLD – No further trades allowed (max risky / daily limit).")
@@ -933,6 +1030,17 @@ def main():
         initialize_trade_files()
         check_open_trades()
 
+        # Global drawdown check
+        peak = get_peak_balance()
+        if portfolio['balance'] < peak * 0.5:
+            send_discord_message("🚨 Global drawdown limit reached (50% from peak). Trading halted.")
+            return
+
+        # Victory stop
+        if portfolio['balance'] >= 50000:
+            send_discord_message("🎉🎉🎉 CHALLENGE COMPLETE! $50,000 reached! 🎉🎉🎉")
+            return
+
         start_balance = get_daily_start_balance()
         if daily_pnl() <= -start_balance * DAILY_LOSS_PCT:
             send_discord_message(
@@ -940,6 +1048,7 @@ def main():
                 f"No new trades today.")
             return
 
+        old_balance = portfolio['balance']
         sig, top5, top_layers, skipped, risky_count = generate_signal()
         if sig:
             log_signal(sig); add_open_trade(sig)
@@ -950,6 +1059,11 @@ def main():
                 send_discord_message(format_hold_message(top5, top_layers, risky_limit=True))
             else:
                 send_discord_message(format_hold_message(top5, top_layers, skipped))
+
+        # Update peak and check milestones after any balance change
+        update_peak_balance()
+        check_milestones(old_balance, portfolio['balance'])
+
     except Exception as e:
         err = f"Bot crashed: {traceback.format_exc()[:500]}"
         print(err); send_discord_message(err)
