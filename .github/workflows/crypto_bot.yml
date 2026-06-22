@@ -1,7 +1,7 @@
 name: Crypto Swing Bot (Manual)
 
 on:
-  workflow_dispatch:                # only manual trigger
+  workflow_dispatch:                # manual trigger only
 
 jobs:
   run-bot:
@@ -19,12 +19,12 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install pandas numpy yfinance matplotlib mplfinance requests
+          pip install -r requirements.txt
 
       - name: Download previous state (if exists)
         uses: dawidd6/action-download-artifact@v2
         with:
-          workflow: crypto_bot.yml      # must match the exact filename (without .yml path)
+          workflow: crypto_bot.yml      # must match this file's exact name (without path)
           name: bot-state
           path: .
           if_no_artifact_found: warn
@@ -34,7 +34,7 @@ jobs:
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-        run: python crypto_bot.py       # change if your script name is different
+        run: python crypto_bot.py
 
       - name: Upload updated state
         if: always()
