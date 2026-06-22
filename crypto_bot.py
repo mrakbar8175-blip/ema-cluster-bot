@@ -29,7 +29,6 @@ MAX_RISKY_TRADES = 2          # max open trades without breakeven
 MIN_SCORE = 8.0               # higher threshold for 2R setups
 TP_MULTIPLIER = 2.0           # reward:risk ratio
 MIN_NOTIONAL = 1.0            # KuCoin minimum trade value in USDT
-TRAIL_TRIGGERS = [0.5, 1.0, 1.5]  # R multiples where stop moves (breakeven, 0.5R, 1R)
 
 # ========== DYNAMIC COIN LIST ==========
 def fetch_top_liquid_coins(limit=50):
@@ -76,7 +75,7 @@ def load_portfolio():
         try:
             with open(PORTFOLIO_FILE) as f: data = json.load(f)
             return {
-                "balance": data.get("balance", 20.0),       # Challenge start $20
+                "balance": data.get("balance", 20.0),
                 "realized_pnl": data.get("realized_pnl", 0.0),
                 "open_positions": data.get("open_positions", 0)
             }
@@ -303,7 +302,7 @@ def strong_support_resistance(df, direction, lookback=50, min_touches=2, toleran
         resistance = min(resistances)
         return True, resistance
 
-# ========== SCORING (Tuned for 2R) ==========
+# ========== SCORING (Tuned for 2R, with soft exhaustion penalty) ==========
 def score_pair_2R(pair):
     layers = {}
     df_d = get_yahoo_klines(pair, '1d', days=90)
@@ -336,7 +335,7 @@ def score_pair_2R(pair):
         elif price < ema50_4h.iloc[-1] and ema50_4h.iloc[-1] < ema200_4h.iloc[-1]:
             trend_daily = -1
         else:
-            return 0, None, None, None, None, {"Daily trend": (0,0,"FAIL: no clear trend (daily or 4h)")}
+            return 0, None, None, None, None, {"Daily trend": (0,0,"FAIL: no clear trend")}
 
     direction = "LONG" if trend_daily == 1 else "SHORT"
 
@@ -348,21 +347,27 @@ def score_pair_2R(pair):
         stop = price + raw_stop
     risk = abs(price - stop)
     tp = price + TP_MULTIPLIER * risk if direction == "LONG" else price - TP_MULTIPLIER * risk
-    if abs(tp - price) > 2.5 * atr_val:
-        return 0, direction, price, atr_val, None, {"2R Feasibility": (0,0,"FAIL: TP > 2.5x ATR")}
+    if abs(tp - price) > 5.5 * atr_val:
+        return 0, direction, price, atr_val, None, {"2R Feasibility": (0,0,"FAIL: TP > 5.5x ATR")}
 
-    # Trend exhaustion
+    # Trend exhaustion – soft penalty
+    exhaustion_penalty = 0
+    dist_ema50 = 0
     if direction == "LONG":
         dist_ema50 = (price - ema50_d.iloc[-1]) / ema50_d.iloc[-1] * 100
-        if dist_ema50 > 3.5:
-            return 0, direction, price, atr_val, None, {"Trend Exhaustion": (0,0,"FAIL: extended >3.5% above EMA50")}
+        if dist_ema50 > 6.0:
+            return 0, direction, price, atr_val, None, {"Trend Exhaustion": (0,0,"FAIL: extended >6% above EMA50")}
+        elif dist_ema50 > 3.5:
+            exhaustion_penalty = 1.5
     else:
         dist_ema50 = (ema50_d.iloc[-1] - price) / ema50_d.iloc[-1] * 100
-        if dist_ema50 > 3.5:
-            return 0, direction, price, atr_val, None, {"Trend Exhaustion": (0,0,"FAIL: extended >3.5% below EMA50")}
+        if dist_ema50 > 6.0:
+            return 0, direction, price, atr_val, None, {"Trend Exhaustion": (0,0,"FAIL: extended >6% below EMA50")}
+        elif dist_ema50 > 3.5:
+            exhaustion_penalty = 1.5
 
     # ---- Layers ----
-    # 1. EMA Alignment (4h) – weight 2.5
+    # 1. EMA Alignment (4h)
     ema50_4h = ema(df_4h['Close'], 50)
     ema200_4h = ema(df_4h['Close'], 200)
     if direction == "LONG":
@@ -371,13 +376,13 @@ def score_pair_2R(pair):
         ema_ok = price < ema50_4h.iloc[-1] and ema50_4h.iloc[-1] < ema200_4h.iloc[-1]
     layers["EMA Align"] = (2.5 if ema_ok else 0, 2.5, "OK" if ema_ok else "FAIL")
 
-    # 2. ADX – weight 2.0
+    # 2. ADX
     adx_val, di_plus, di_minus = adx(df_4h)
     adx_dir = (di_plus > di_minus) if direction == "LONG" else (di_minus > di_plus)
     adx_ok = adx_val > 22 and adx_dir
     layers["ADX"] = (2.0 if adx_ok else 0, 2.0, "OK" if adx_ok else "FAIL")
 
-    # 3. RSI 4H – weight 1.5
+    # 3. RSI 4H
     rsi_val = rsi(df_4h)
     if rsi_val is not None:
         rsi_ok = rsi_val > 50 if direction == "LONG" else rsi_val < 50
@@ -385,13 +390,13 @@ def score_pair_2R(pair):
     else:
         layers["RSI 4h"] = (0, 1.5, "FAIL: NaN")
 
-    # 4. MACD 4H – weight 1.5
+    # 4. MACD 4H
     macd_line, macd_signal, macd_hist, macd_hist_prev = macd(df_4h)
     macd_expanding = (direction=="LONG" and macd_hist>0 and macd_hist>macd_hist_prev) or \
                      (direction=="SHORT" and macd_hist<0 and macd_hist<macd_hist_prev)
     layers["MACD"] = (1.5 if macd_expanding else 0, 1.5, "OK" if macd_expanding else "FAIL")
 
-    # 5. Enhanced S/R – weight 1.5
+    # 5. Enhanced S/R
     sr_ok, sr_level = strong_support_resistance(df_4h, direction, lookback=50, min_touches=2)
     if sr_ok and sr_level:
         if direction == "LONG":
@@ -402,27 +407,27 @@ def score_pair_2R(pair):
     else:
         layers["S/R"] = (0, 1.5, "FAIL: no strong level")
 
-    # 6. Candle Momentum (1H) – weight 1.0
+    # 6. Candle Momentum (1H)
     last_candle_1h = df_1h.iloc[-1]
     candle_range = last_candle_1h['High'] - last_candle_1h['Low']
     bullish_mom = (last_candle_1h['Close'] - last_candle_1h['Open']) / candle_range if candle_range > 0 else 0
     mom_ok = (bullish_mom > 0.6) if direction=="LONG" else (bullish_mom < -0.6)
     layers["Candle Mom"] = (1.0 if mom_ok else 0, 1.0, "OK" if mom_ok else "FAIL")
 
-    # 7. Micro Trend (1H) – weight 1.0
+    # 7. Micro Trend (1H)
     prev_candle_1h = df_1h.iloc[-2]
     micro_up = last_candle_1h['Close'] > last_candle_1h['Open'] and prev_candle_1h['Close'] > prev_candle_1h['Open']
     micro_down = last_candle_1h['Close'] < last_candle_1h['Open'] and prev_candle_1h['Close'] < prev_candle_1h['Open']
     micro_ok = (micro_up if direction=="LONG" else micro_down)
     layers["Micro Trend"] = (1.0 if micro_ok else 0, 1.0, "OK" if micro_ok else "FAIL")
 
-    # 8. Volume – weight 1.0 (20‑bar average)
+    # 8. Volume
     vol_last = df_4h['Volume'].iloc[-1]
     vol_avg20 = df_4h['Volume'].iloc[-21:-1].mean() if len(df_4h) >= 21 else df_4h['Volume'].mean()
     vol_ok = vol_last > vol_avg20 * 1.5 if vol_avg20 > 0 else False
     layers["Volume"] = (1.0 if vol_ok else 0, 1.0, "OK" if vol_ok else "FAIL")
 
-    # 9. Market (BTC) – weight 0.5
+    # 9. Market (BTC)
     btc_df = get_hybrid_klines("BTC-USD", '4h', days=14)
     market_ok = False
     if not btc_df.empty and len(btc_df) >= 50:
@@ -434,12 +439,12 @@ def score_pair_2R(pair):
             market_ok = True
     layers["Market"] = (0.5 if market_ok else 0, 0.5, "OK" if market_ok else "FAIL")
 
-    # 10. ATR – weight 1.0
+    # 10. ATR
     atr_pct = atr_val / price
     atr_ok = atr_pct > 0.008
     layers["ATR"] = (1.0 if atr_ok else 0, 1.0, "OK" if atr_ok else "FAIL")
 
-    # 11. Daily confirmation – up to 2.0
+    # 11. Daily confirmation
     rsi_d = rsi(df_d, 14)
     macd_d_line, macd_d_signal, macd_d_hist, macd_d_hist_prev = macd(df_d)
     daily_points = 0
@@ -459,7 +464,16 @@ def score_pair_2R(pair):
             daily_points += 0.5
     layers["Daily Conf."] = (daily_points, 2.0, "OK")
 
+    # Exhaustion layer info
+    if exhaustion_penalty > 0:
+        layers["Trend Exhaustion"] = (-exhaustion_penalty, 0, f"WARN: {dist_ema50:.1f}% extended, penalty -{exhaustion_penalty}")
+    else:
+        layers["Trend Exhaustion"] = (0, 0, "OK")
+
     total = sum(score for score,_,_ in layers.values())
+    total -= exhaustion_penalty
+    total = max(0, total)
+
     return total, direction, price, atr_val, (sr_level if sr_ok else None), layers
 
 # ========== AI CONFIRMATION ==========
@@ -514,24 +528,24 @@ def generate_signal():
     except: pass
 
     all_scored = []
-    skipped = 0
+    data_failures = 0
     for pair in CRYPTO_PAIRS:
         if pair in open_symbols_risky: continue
         score, direction, price, atr_val, swing_level, layers = score_pair_2R(pair)
-        # Always add to all_scored, even if direction is None (will have a FAIL layer)
+        if direction is None:
+            data_failures += 1
+            continue
         all_scored.append((pair, score, direction, price, atr_val, swing_level, layers))
 
-    # Sort by score descending (zero-score coins included)
     all_scored.sort(key=lambda x: x[1], reverse=True)
     top5 = all_scored[:5]
-    # Top overall is the first element
     top_overall = top5[0] if top5 else None
 
-    print(f"Scored pairs: {len(all_scored)}, skipped: {len(CRYPTO_PAIRS)-len(all_scored)}")
+    print(f"Scored pairs: {len(all_scored)}, data failures: {data_failures}")
 
     candidates = [item for item in all_scored if item[1] >= MIN_SCORE]
     if not candidates:
-        return None, top5, top_overall[6] if top_overall else {}, 0, risky_count
+        return None, top5, top_overall[6] if top_overall else {}, data_failures, risky_count
 
     pair, score, direction, price, atr_val, swing_level, layers = candidates[0]
 
@@ -551,7 +565,7 @@ def generate_signal():
     quantity = round((portfolio['balance'] * RISK_PERCENT) / risk, 8)
     if quantity * price < MIN_NOTIONAL:
         print(f"Skipping {pair}: trade value {quantity*price:.2f} < ${MIN_NOTIONAL}")
-        return None, top5, layers, 0, risky_count
+        return None, top5, layers, data_failures, risky_count
 
     signal = {
         "action": direction,
@@ -566,9 +580,9 @@ def generate_signal():
     }
     if not ai_confirm_trade(signal):
         print(f"AI rejected {pair} {direction} (score {score:.1f})")
-        return None, top5, layers, 0, risky_count
+        return None, top5, layers, data_failures, risky_count
     signal["ai_approved"] = True
-    return signal, top5, layers, 0, risky_count
+    return signal, top5, layers, data_failures, risky_count
 
 # ========== DISCORD HELPERS ==========
 def send_discord_message(text):
@@ -840,15 +854,15 @@ def format_signal(sig):
             f"Entry: {fmt_price(entry, entry)} | Stop: {fmt_price(stop, entry)} (-{stop_pct:.2f}%)\n"
             f"TP (2R): {fmt_price(tp, entry)}{fail_warning}")
 
-# ========== HOLD MESSAGE (improved) ==========
+# ========== HOLD MESSAGE ==========
 def format_hold_message(top5, top_layers, skipped=0, risky_limit=False):
     if risky_limit:
         return "HOLD – Maximum risky trades reached. No new signals until a trade hits breakeven."
     if not top5:
-        return f"HOLD – No valid setups (no coins passed initial data checks)."
+        return f"HOLD – No valid setups (all {skipped} coins failed data fetch)."
     lines = []
-    # If the top score is below MIN_SCORE, it's a hold
-    if top5[0][1] < MIN_SCORE:
+    top_score = top5[0][1]
+    if top_score < MIN_SCORE:
         lines.append("HOLD – No high‑conviction setup found.")
     else:
         lines.append("HOLD – No further trades allowed (max risky / daily limit).")
@@ -856,20 +870,16 @@ def format_hold_message(top5, top_layers, skipped=0, risky_limit=False):
     lines.append(f"\n📊 **Top Coin Scores** (of {len(top5)})")
     for idx, (pair, score, direction, _, _, _, _) in enumerate(top5, 1):
         short = pair.replace("-USD","")
-        if direction is None:
-            dir_str = "N/A"
-        else:
-            dir_str = direction
+        dir_str = direction if direction else "N/A"
         lines.append(f"{idx}. {short} → {dir_str} ({score:.1f}/11.5)")
 
-    # Layer breakdown of top coin (even if score 0)
     if top_layers:
         top_pair = top5[0][0].replace("-USD","")
-        top_score = top5[0][1]
+        top_score_val = top5[0][1]
         top_dir = top5[0][2] if top5[0][2] else "N/A"
-        lines.append(f"\n🔎 **Top Coin Layer Breakdown:** {top_pair} ({top_dir}, {top_score:.1f})")
+        lines.append(f"\n🔎 **Top Coin Layer Breakdown:** {top_pair} ({top_dir}, {top_score_val:.1f})")
         for name, (earned, max_, status) in top_layers.items():
-            if "FAIL" in status:
+            if "FAIL" in status or "WARN" in status:
                 lines.append(f"• {name} ({max_}): ⚠️ {status}")
             elif earned > 0:
                 lines.append(f"• {name} ({max_}): ✅")
@@ -879,7 +889,7 @@ def format_hold_message(top5, top_layers, skipped=0, risky_limit=False):
         lines.append("\nNo layer data available.")
 
     if skipped > 0:
-        lines.append(f"\n({skipped} coins skipped due to data failures or trendlessness.)")
+        lines.append(f"\n({skipped} coins skipped due to data failure.)")
     return "\n".join(lines)
 
 # ========== CHART ON SIGNAL ==========
