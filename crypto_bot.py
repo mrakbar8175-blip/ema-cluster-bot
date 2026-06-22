@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Crypto Swing Bot – 4H timeframe, KuCoin+Yahoo hybrid, Single TP 2R, Trailing stop
-Optimized for $20→$50k challenge: 10% risk, max 2 risky trades, 20% daily loss limit.
-Scoring layers tuned for 2R winrate. Always shows top 5 coins + failure reasons on hold.
+Crypto Swing Bot – 4H, 4 TP levels (0.5/1.0/1.5/2.0R)
+Full position closed by trailing stop or final TP (2R) – no partials.
+Trailing stop moves: 0.5R → breakeven, 1.0R → 0.5R, 1.5R → 1.0R
 """
 
 import requests, json, os, traceback, math
@@ -23,12 +23,12 @@ BLACKLIST = {
 }
 
 # ========== CHALLENGE PARAMETERS ==========
-RISK_PERCENT = 0.10           # 10% risk per trade
-DAILY_LOSS_PCT = 0.20         # 20% of start-of-day balance
-MAX_RISKY_TRADES = 2          # max open trades without breakeven
-MIN_SCORE = 8.0               # higher threshold for 2R setups
-TP_MULTIPLIER = 2.0           # reward:risk ratio
-MIN_NOTIONAL = 1.0            # KuCoin minimum trade value in USDT
+RISK_PERCENT = 0.10
+DAILY_LOSS_PCT = 0.20
+MAX_RISKY_TRADES = 2
+MIN_SCORE = 8.0
+TP_MULTIPLIER = 2.0           # final TP is 2R (TP4)
+MIN_NOTIONAL = 1.0
 
 # ========== DYNAMIC COIN LIST ==========
 def fetch_top_liquid_coins(limit=50):
@@ -302,7 +302,7 @@ def strong_support_resistance(df, direction, lookback=50, min_touches=2, toleran
         resistance = min(resistances)
         return True, resistance
 
-# ========== SCORING (Tuned for 2R, with soft exhaustion penalty) ==========
+# ========== SCORING (same robust filters) ==========
 def score_pair_2R(pair):
     layers = {}
     df_d = get_yahoo_klines(pair, '1d', days=90)
@@ -320,7 +320,6 @@ def score_pair_2R(pair):
     if atr_val is None or atr_val <= 0:
         return 0, None, None, None, None, {"ATR": (0,0,"FAIL: ATR invalid")}
 
-    # Daily trend
     ema50_d = ema(df_d['Close'], 50)
     ema200_d = ema(df_d['Close'], 200)
     if price > ema50_d.iloc[-1] and ema50_d.iloc[-1] > ema200_d.iloc[-1]:
@@ -339,18 +338,17 @@ def score_pair_2R(pair):
 
     direction = "LONG" if trend_daily == 1 else "SHORT"
 
-    # Stop / risk / TP feasibility
     raw_stop = atr_val * 2.5
     if direction == "LONG":
         stop = price - raw_stop
     else:
         stop = price + raw_stop
     risk = abs(price - stop)
-    tp = price + TP_MULTIPLIER * risk if direction == "LONG" else price - TP_MULTIPLIER * risk
-    if abs(tp - price) > 5.5 * atr_val:
+    tp_final = price + TP_MULTIPLIER * risk if direction == "LONG" else price - TP_MULTIPLIER * risk
+    if abs(tp_final - price) > 5.5 * atr_val:
         return 0, direction, price, atr_val, None, {"2R Feasibility": (0,0,"FAIL: TP > 5.5x ATR")}
 
-    # Trend exhaustion – soft penalty
+    # Soft exhaustion penalty
     exhaustion_penalty = 0
     dist_ema50 = 0
     if direction == "LONG":
@@ -367,7 +365,6 @@ def score_pair_2R(pair):
             exhaustion_penalty = 1.5
 
     # ---- Layers ----
-    # 1. EMA Alignment (4h)
     ema50_4h = ema(df_4h['Close'], 50)
     ema200_4h = ema(df_4h['Close'], 200)
     if direction == "LONG":
@@ -376,13 +373,11 @@ def score_pair_2R(pair):
         ema_ok = price < ema50_4h.iloc[-1] and ema50_4h.iloc[-1] < ema200_4h.iloc[-1]
     layers["EMA Align"] = (2.5 if ema_ok else 0, 2.5, "OK" if ema_ok else "FAIL")
 
-    # 2. ADX
     adx_val, di_plus, di_minus = adx(df_4h)
     adx_dir = (di_plus > di_minus) if direction == "LONG" else (di_minus > di_plus)
     adx_ok = adx_val > 22 and adx_dir
     layers["ADX"] = (2.0 if adx_ok else 0, 2.0, "OK" if adx_ok else "FAIL")
 
-    # 3. RSI 4H
     rsi_val = rsi(df_4h)
     if rsi_val is not None:
         rsi_ok = rsi_val > 50 if direction == "LONG" else rsi_val < 50
@@ -390,13 +385,11 @@ def score_pair_2R(pair):
     else:
         layers["RSI 4h"] = (0, 1.5, "FAIL: NaN")
 
-    # 4. MACD 4H
     macd_line, macd_signal, macd_hist, macd_hist_prev = macd(df_4h)
     macd_expanding = (direction=="LONG" and macd_hist>0 and macd_hist>macd_hist_prev) or \
                      (direction=="SHORT" and macd_hist<0 and macd_hist<macd_hist_prev)
     layers["MACD"] = (1.5 if macd_expanding else 0, 1.5, "OK" if macd_expanding else "FAIL")
 
-    # 5. Enhanced S/R
     sr_ok, sr_level = strong_support_resistance(df_4h, direction, lookback=50, min_touches=2)
     if sr_ok and sr_level:
         if direction == "LONG":
@@ -407,27 +400,23 @@ def score_pair_2R(pair):
     else:
         layers["S/R"] = (0, 1.5, "FAIL: no strong level")
 
-    # 6. Candle Momentum (1H)
     last_candle_1h = df_1h.iloc[-1]
     candle_range = last_candle_1h['High'] - last_candle_1h['Low']
     bullish_mom = (last_candle_1h['Close'] - last_candle_1h['Open']) / candle_range if candle_range > 0 else 0
     mom_ok = (bullish_mom > 0.6) if direction=="LONG" else (bullish_mom < -0.6)
     layers["Candle Mom"] = (1.0 if mom_ok else 0, 1.0, "OK" if mom_ok else "FAIL")
 
-    # 7. Micro Trend (1H)
     prev_candle_1h = df_1h.iloc[-2]
     micro_up = last_candle_1h['Close'] > last_candle_1h['Open'] and prev_candle_1h['Close'] > prev_candle_1h['Open']
     micro_down = last_candle_1h['Close'] < last_candle_1h['Open'] and prev_candle_1h['Close'] < prev_candle_1h['Open']
     micro_ok = (micro_up if direction=="LONG" else micro_down)
     layers["Micro Trend"] = (1.0 if micro_ok else 0, 1.0, "OK" if micro_ok else "FAIL")
 
-    # 8. Volume
     vol_last = df_4h['Volume'].iloc[-1]
     vol_avg20 = df_4h['Volume'].iloc[-21:-1].mean() if len(df_4h) >= 21 else df_4h['Volume'].mean()
     vol_ok = vol_last > vol_avg20 * 1.5 if vol_avg20 > 0 else False
     layers["Volume"] = (1.0 if vol_ok else 0, 1.0, "OK" if vol_ok else "FAIL")
 
-    # 9. Market (BTC)
     btc_df = get_hybrid_klines("BTC-USD", '4h', days=14)
     market_ok = False
     if not btc_df.empty and len(btc_df) >= 50:
@@ -439,12 +428,10 @@ def score_pair_2R(pair):
             market_ok = True
     layers["Market"] = (0.5 if market_ok else 0, 0.5, "OK" if market_ok else "FAIL")
 
-    # 10. ATR
     atr_pct = atr_val / price
     atr_ok = atr_pct > 0.008
     layers["ATR"] = (1.0 if atr_ok else 0, 1.0, "OK" if atr_ok else "FAIL")
 
-    # 11. Daily confirmation
     rsi_d = rsi(df_d, 14)
     macd_d_line, macd_d_signal, macd_d_hist, macd_d_hist_prev = macd(df_d)
     daily_points = 0
@@ -464,7 +451,6 @@ def score_pair_2R(pair):
             daily_points += 0.5
     layers["Daily Conf."] = (daily_points, 2.0, "OK")
 
-    # Exhaustion layer info
     if exhaustion_penalty > 0:
         layers["Trend Exhaustion"] = (-exhaustion_penalty, 0, f"WARN: {dist_ema50:.1f}% extended, penalty -{exhaustion_penalty}")
     else:
@@ -560,7 +546,11 @@ def generate_signal():
         if swing_level and swing_level < price + raw_stop * 1.2:
             stop = max(stop, swing_level + 0.05 * atr_val)
     risk = abs(price - stop)
-    tp = price + TP_MULTIPLIER * risk if direction == "LONG" else price - TP_MULTIPLIER * risk
+
+    # ---- 4 TP levels: 0.5 / 1.0 / 1.5 / 2.0R ----
+    tp_multipliers = [0.5, 1.0, 1.5, 2.0]
+    take_profits = [price + m * risk if direction == "LONG" else price - m * risk for m in tp_multipliers]
+    final_tp = take_profits[-1]   # 2R
 
     quantity = round((portfolio['balance'] * RISK_PERCENT) / risk, 8)
     if quantity * price < MIN_NOTIONAL:
@@ -573,7 +563,8 @@ def generate_signal():
         "quantity": quantity,
         "limit_price": price,
         "stop_loss": stop,
-        "take_profit": tp,
+        "take_profits": take_profits,    # list of 4 prices
+        "take_profit": final_tp,         # for CSV log (2R)
         "score": score,
         "atr": atr_val,
         "layers": layers
@@ -600,8 +591,13 @@ def send_discord_image(image_path, caption=""):
             print(f"Image sent, status: {resp.status_code}")
     except Exception as e: print("Discord image error:", e)
 
-# ========== TRAILING STOP ==========
+# ========== STEPPED TRAILING STOP (4 TP) ==========
 def get_trailing_stop(entry, risk, direction, highest_price, lowest_price):
+    """
+    0.5R move → breakeven
+    1.0R move → stop at 0.5R
+    1.5R move → stop at 1.0R
+    """
     if direction == "LONG":
         move = highest_price - entry
         if move >= 1.5 * risk:
@@ -609,9 +605,9 @@ def get_trailing_stop(entry, risk, direction, highest_price, lowest_price):
         elif move >= 1.0 * risk:
             return entry + 0.5 * risk
         elif move >= 0.5 * risk:
-            return entry
+            return entry   # breakeven
         else:
-            return entry - risk
+            return entry - risk   # original stop
     else:
         move = entry - lowest_price
         if move >= 1.5 * risk:
@@ -644,7 +640,7 @@ def check_open_trades():
         try:
             sym = trade["symbol"]; direction = trade["action"]
             entry = float(trade["entry"]); original_stop = float(trade["stop"])
-            tp = float(trade["TP"])
+            final_tp = float(trade["TP"])
             qty = float(trade["quantity"])
             try: entry_time = datetime.strptime(trade["timestamp"], "%Y-%m-%d %H:%M:%S")
             except: still_open.append(trade); continue
@@ -664,10 +660,11 @@ def check_open_trades():
             for candle_time, candle in df_1h.iterrows():
                 high = candle['High']; low = candle['Low']
 
-                if direction == "LONG" and high >= tp:
-                    exit_price = tp; hit_level = "TP HIT"; trade_closed = True; break
-                if direction == "SHORT" and low <= tp:
-                    exit_price = tp; hit_level = "TP HIT"; trade_closed = True; break
+                # Hard exit at final TP (2R)
+                if direction == "LONG" and high >= final_tp:
+                    exit_price = final_tp; hit_level = "TP4 (2R)"; trade_closed = True; break
+                if direction == "SHORT" and low <= final_tp:
+                    exit_price = final_tp; hit_level = "TP4 (2R)"; trade_closed = True; break
 
                 if direction == "LONG":
                     highest_seen = max(highest_seen, high)
@@ -704,10 +701,12 @@ def check_open_trades():
             results.append(result_row)
             update_portfolio({'pnl': pnl})
 
-            if hit_level == "TP HIT":
-                msg = f"🎯 **TP Hit!** {sym} {direction} closed at {exit_price:.6f}. P&L: {pnl:.2f} USDT"
+            if "TP4" in hit_level:
+                msg = f"🎯 **TP4 (2R) Hit!** {sym} {direction} closed at {exit_price:.6f}. P&L: {pnl:.2f} USDT"
+            elif "TRAILING" in hit_level:
+                msg = f"🛑 **Trailing Stop Hit** {sym} {direction} closed at {exit_price:.6f}. P&L: {pnl:.2f} USDT"
             else:
-                msg = f"🛑 **{hit_level}** {sym} {direction} closed at {exit_price:.6f}. P&L: {pnl:.2f} USDT"
+                msg = f"🔴 **Stop Loss Hit** {sym} {direction} closed at {exit_price:.6f}. P&L: {pnl:.2f} USDT"
             alerts.append(msg)
             print("ALERT:", msg)
             send_discord_message(msg)
@@ -841,7 +840,8 @@ def fmt_price(price, reference_price=None):
 def format_signal(sig):
     sym = sig["symbol"].replace("-USD","")
     direction = sig["action"]
-    entry = sig["limit_price"]; stop = sig["stop_loss"]; tp = sig["take_profit"]
+    entry = sig["limit_price"]; stop = sig["stop_loss"]
+    tps = sig["take_profits"]   # 4 prices
     risk = abs(entry - stop); stop_pct = risk / entry * 100
     icon = "🟢 LONG" if direction == "LONG" else "🔴 SHORT"
     score = sig["score"]
@@ -850,9 +850,10 @@ def format_signal(sig):
     if layers:
         failed = [name for name, (_,_,status) in layers.items() if "FAIL" in status]
         if failed: fail_warning = f" ⚠️ Data: {', '.join(failed)}"
+    tp_str = " / ".join([fmt_price(tp, entry) for tp in tps])
     return (f"${sym} – {icon} Setup (4H) | Score: {score:.1f}/{11.5}\n"
             f"Entry: {fmt_price(entry, entry)} | Stop: {fmt_price(stop, entry)} (-{stop_pct:.2f}%)\n"
-            f"TP (2R): {fmt_price(tp, entry)}{fail_warning}")
+            f"TPs (0.5/1.0/1.5/2.0R): {tp_str}{fail_warning}")
 
 # ========== HOLD MESSAGE ==========
 def format_hold_message(top5, top_layers, skipped=0, risky_limit=False):
@@ -906,11 +907,15 @@ def send_trade_chart(signal):
         fig, axes = mpf.plot(df, type='candle', style=mpf_style, title=f"{sym} 4h", ylabel='Price',
                              addplot=addplots, returnfig=True, figsize=(8,6))
         ax = axes[0]
-        entry = signal.get('limit_price'); stop = signal.get('stop_loss'); tp = signal.get('take_profit')
+        entry = signal.get('limit_price'); stop = signal.get('stop_loss')
+        tps = signal.get('take_profits', [])
         if entry:
             ax.axhline(y=entry, color='#f1c40f', linestyle='--', linewidth=1.5, label='Entry')
             ax.axhline(y=stop, color='#e74c3c', linestyle='--', linewidth=1.5, label='Stop')
-            ax.axhline(y=tp, color='#2ecc71', linestyle='--', linewidth=1.5, label='TP (2R)')
+            if tps:
+                for i, tp in enumerate(tps):
+                    ax.axhline(y=tp, color='#2ecc71', linestyle='--', linewidth=1, alpha=0.6,
+                               label=f'TP{i+1}' if i==0 else None)
             ax.legend(loc='upper left', facecolor='#000000', edgecolor='white', labelcolor='white')
         chart_path = f"{sym}_chart.png"
         fig.savefig(chart_path, dpi=100, bbox_inches='tight', facecolor='black')
