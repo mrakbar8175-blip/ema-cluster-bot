@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 High‑Winrate Forex Swing Bot – Discord Edition
-TP1 1R, TPs 1/2/3/4/5R, expectancy optimised, score /10.
+Detailed HOLD messages with top 10 pairs + layer breakdown.
 """
 
 import requests, json, os, traceback
@@ -290,23 +290,24 @@ def support_resistance_levels(df, lookback=20):
     low = recent['Low'].min()
     return high, low
 
-# ========== MULTI‑LAYER SCORING (score /10) ==========
+# ========== MULTI‑LAYER SCORING (score /10, returns layer_scores) ==========
 def score_pair(pair):
     warnings = []
+    empty_layers = {}
     df_d = get_data(pair, interval='1d', days=90)
     if df_d.empty or len(df_d) < 50:
         warnings.append(f"{pair}: insufficient daily data ({len(df_d)} candles)")
-        return 0, None, None, None, None, warnings
+        return 0, None, None, None, None, warnings, empty_layers
 
     df_4h = get_data(pair, interval='4h', days=14)
     if df_4h.empty or len(df_4h) < 50:
         warnings.append(f"{pair}: insufficient 4h data ({len(df_4h)} candles)")
-        return 0, None, None, None, None, warnings
+        return 0, None, None, None, None, warnings, empty_layers
 
     df_1h = get_data(pair, interval='1h', days=3)
     if df_1h.empty or len(df_1h) < 10:
         warnings.append(f"{pair}: insufficient 1h data ({len(df_1h)} candles)")
-        return 0, None, None, None, None, warnings
+        return 0, None, None, None, None, warnings, empty_layers
 
     price = df_4h['Close'].iloc[-1]
 
@@ -319,11 +320,11 @@ def score_pair(pair):
     elif price < ema50_d.iloc[-1] and ema50_d.iloc[-1] < ema200_d.iloc[-1]:
         trend_daily = -1
     if trend_daily == 0:
-        return 0, None, None, None, None, warnings
+        return 0, None, None, None, None, warnings, empty_layers
 
     # Regime detection (ADX>=30, DI spread >=5, EMA slope)
     if not is_strong_trend(df_4h):
-        return 0, None, None, None, None, warnings
+        return 0, None, None, None, None, warnings, empty_layers
 
     # Breakout close mandatory
     recent_10_high = df_4h['High'].iloc[-11:-1].max()
@@ -333,9 +334,9 @@ def score_pair(pair):
 
     direction = "LONG" if trend_daily == 1 else "SHORT"
     if direction == "LONG" and not breakout_long:
-        return 0, None, None, None, None, warnings
+        return 0, None, None, None, None, warnings, empty_layers
     if direction == "SHORT" and not breakout_short:
-        return 0, None, None, None, None, warnings
+        return 0, None, None, None, None, warnings, empty_layers
 
     # 4h indicators
     ema50_4h = ema(df_4h['Close'], 50)
@@ -440,10 +441,26 @@ def score_pair(pair):
     max_raw = 13.4
     score = round((raw_total / max_raw) * 10.0, 1)
 
-    if score < 5.5:
-        return 0, None, None, None, None, warnings
+    layer_scores = {
+        "daily_trend": trend_daily != 0,
+        "breakout": breakout_long if direction == "LONG" else breakout_short,
+        "ema_align": ema_align,
+        "adx": adx_trending and adx_dir,
+        "rsi": (rsi_val > 50) if direction == "LONG" else (rsi_val < 50),
+        "macd": macd_expanding,
+        "sr_proximity": near_support if direction == "LONG" else near_resistance,
+        "volume_surge": vol_surge,
+        "dxy_aligned": dxy_aligned,
+        "candle_momentum": candle_momentum_ok,
+        "rsi_1h": rsi_1h_ok,
+        "micro_trend": micro_trend_ok,
+        "atr_floor": atr_ok,
+    }
 
-    return score, direction, price, atr_val, (sup if direction == "LONG" else res), warnings
+    if score < 5.5:
+        return 0, None, None, None, None, warnings, layer_scores
+
+    return score, direction, price, atr_val, (sup if direction == "LONG" else res), warnings, layer_scores
 
 # ========== AI CONFIRMATION GATE ==========
 def ai_confirm_trade(signal_dict):
@@ -488,11 +505,11 @@ def ai_confirm_trade(signal_dict):
         pass
     return True
 
-# ========== SIGNAL GENERATION ==========
+# ========== SIGNAL GENERATION (detailed HOLD info) ==========
 def generate_signal():
     sess_ok, sess_reason = session_ok()
     if not sess_ok:
-        return None, [f"Session/news filter: {sess_reason}"]
+        return None, [f"Session/news filter: {sess_reason}"], [], {}
 
     open_symbols = set()
     try:
@@ -504,25 +521,48 @@ def generate_signal():
 
     candidates = []
     all_warnings = []
+    all_scored = []
 
     for pair in FOREX_PAIRS:
         if pair in open_symbols:
             continue
-        score, direction, price, atr_val, swing_level, warnings = score_pair(pair)
+        score, direction, price, atr_val, swing_level, warnings, layer_scores = score_pair(pair)
         all_warnings.extend(warnings)
-        if direction and score >= 5.5:
+        if direction is None:
+            continue
+
+        all_scored.append({
+            "pair": pair,
+            "score": score,
+            "direction": direction,
+            "layers": layer_scores,
+            "warnings": warnings
+        })
+
+        if score >= 5.5:
             cor_ok, cor_reason = correlation_ok(pair, direction)
             if not cor_ok:
                 all_warnings.append(f"Correlation skip: {cor_reason}")
                 continue
-            candidates.append((pair, score, direction, price, atr_val, swing_level))
+            candidates.append((pair, score, direction, price, atr_val, swing_level, layer_scores))
+
+    all_scored.sort(key=lambda x: x["score"], reverse=True)
+    top10 = all_scored[:10]
 
     if not candidates:
-        return None, all_warnings
+        top_layer_info = {}
+        if top10:
+            best = top10[0]
+            top_layer_info = {
+                "pair": best["pair"],
+                "score": best["score"],
+                "direction": best["direction"],
+                "layers": best["layers"]
+            }
+        return None, all_warnings, top10, top_layer_info
 
-    candidates.sort(key=lambda x: x[1], reverse=True)
     best = candidates[0]
-    pair, score, direction, price, atr_val, swing_level = best
+    pair, score, direction, price, atr_val, swing_level, _ = best
 
     ps = pip_scale(pair)
     min_pips = 8
@@ -576,12 +616,21 @@ def generate_signal():
 
     if not ai_confirm_trade(signal):
         print(f"AI rejected {pair} {direction} (score {score:.1f})")
-        return None, all_warnings
+        top_layer_info = {}
+        if top10:
+            best_top = top10[0]
+            top_layer_info = {
+                "pair": best_top["pair"],
+                "score": best_top["score"],
+                "direction": best_top["direction"],
+                "layers": best_top["layers"]
+            }
+        return None, all_warnings, top10, top_layer_info
 
     signal["ai_approved"] = True
-    return signal, all_warnings
+    return signal, all_warnings, [], {}
 
-# ========== TRADE MANAGEMENT (30/10/10/10/40 fractions, trailing stop) ==========
+# ========== TRADE MANAGEMENT ==========
 def check_open_trades():
     try:
         open_df = pd.read_csv(OPEN_TRADES_CSV)
@@ -633,7 +682,6 @@ def check_open_trades():
             current_stop = tps[0]
         if highest_tp_idx >= 2:
             current_stop = tps[1]
-        # subsequent locks can be added but we keep simple
 
         for candle_time, candle in df_1h.iterrows():
             high = candle['High']
@@ -721,15 +769,13 @@ def check_open_trades():
 
 # ========== DISCORD MESSAGING ==========
 def send_discord_message(text):
-    """Send a plain text message to Discord webhook."""
     try:
-        payload = {"content": text[:2000]}  # Discord limit
+        payload = {"content": text[:2000]}
         requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=10)
     except Exception as e:
         print("Discord message error:", e)
 
 def send_discord_chart(chart_path, caption=""):
-    """Send an image file to Discord webhook with an optional caption."""
     try:
         with open(chart_path, 'rb') as f:
             files = {"file": (os.path.basename(chart_path), f, 'image/png')}
@@ -868,6 +914,39 @@ def format_signal(sig):
         f"Lot Size: {lot:.2f} (Risk: 1%)"
     )
 
+# ========== FORMATTING FOR HOLD MESSAGE ==========
+def format_top10(top10_list):
+    lines = []
+    for i, item in enumerate(top10_list, 1):
+        direction_str = "🟢" if item["direction"] == "LONG" else "🔴"
+        lines.append(f"{i}. {direction_str} {item['pair']}: {item['score']:.1f}/10")
+    return "\n".join(lines)
+
+def format_layer_breakdown(layer_info):
+    layers = layer_info.get("layers", {})
+    if not layers:
+        return "No layer data."
+    names = {
+        "daily_trend": "Daily trend",
+        "breakout": "Breakout close",
+        "ema_align": "4h EMA align",
+        "adx": "ADX trend strong",
+        "rsi": "RSI direction",
+        "macd": "MACD expanding",
+        "sr_proximity": "Near S/R",
+        "volume_surge": "Volume surge",
+        "dxy_aligned": "DXY aligned",
+        "candle_momentum": "1h candle momentum",
+        "rsi_1h": "1h RSI not extreme",
+        "micro_trend": "1h micro trend",
+        "atr_floor": "ATR >= 10 pips",
+    }
+    msg = "**Layer breakdown for top pair:**\n"
+    for k in layers:
+        icon = "✅" if layers[k] else "❌"
+        msg += f"{icon} {names.get(k, k)}\n"
+    return msg
+
 # ========== MAIN ==========
 def main():
     try:
@@ -878,7 +957,7 @@ def main():
             send_discord_message("⚠️ Daily loss limit reached. No new trades today.")
             return
 
-        sig, warnings = generate_signal()
+        sig, warnings, top10, top_layer = generate_signal()
 
         if warnings:
             warn_msg = "⚠️ Data warnings:\n" + "\n".join(warnings)
@@ -889,10 +968,18 @@ def main():
             add_open_trade(sig)
             portfolio['open_positions'] += 1
             save_portfolio(portfolio)
-            # Send text signal and chart
-            send_trade_chart(sig)   # chart already includes caption from format_signal
+            send_trade_chart(sig)   # includes caption from format_signal
         else:
-            send_discord_message("HOLD – No high‑conviction setup found.")
+            hold_msg = "**HOLD – No high‑conviction setup found.**\n\n"
+            if top10:
+                hold_msg += "**Top 10 pairs by conviction:**\n"
+                hold_msg += format_top10(top10)
+                hold_msg += "\n\n"
+                if top_layer:
+                    hold_msg += format_layer_breakdown(top_layer)
+            else:
+                hold_msg += "No scorable pairs available."
+            send_discord_message(hold_msg)
 
     except Exception as e:
         err = f"Bot crashed: {traceback.format_exc()[:500]}"
