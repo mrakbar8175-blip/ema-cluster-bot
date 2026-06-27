@@ -19,8 +19,8 @@ from datetime import datetime, timedelta
 # ============================================================
 DAYS_HISTORY = 730
 BACKTEST_START = "2025-01-01"
-INITIAL_BALANCE = 1000.0
-RISK_PER_TRADE = 0.01
+INITIAL_BALANCE = 20.0       # instead of 1000.0
+RISK_PER_TRADE = 0.025       # instead of 0.01
 MAX_RISKY_TRADES = 5
 DATA_FOLDER = "kucoin_data"
 
