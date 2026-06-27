@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-KuCoin Historical Backtester – 4H & 1H data, 1:2 RR, HIGH SELECTIVITY
+KuCoin Historical Backtester – 4H & 1H data, 1:2 RR, RE-WEIGHTED LAYERS
 Usage: python backtest_ku.py FETCH    (download data)
        python backtest_ku.py BACKTEST (run simulation)
 """
@@ -14,14 +14,13 @@ from datetime import datetime, timedelta
 # ============================================================
 # CONFIGURATION
 # ============================================================
-DAYS_HISTORY = 730        # 2 years
+DAYS_HISTORY = 730
 BACKTEST_START = "2025-01-01"
 INITIAL_BALANCE = 1000.0
-RISK_PER_TRADE = 0.01     # 1% risk
+RISK_PER_TRADE = 0.01
 MAX_RISKY_TRADES = 5
 DATA_FOLDER = "kucoin_data"
 
-# Top‑50 coins
 CRYPTO_PAIRS = [
     "BTC-USDT","ETH-USDT","BNB-USDT","SOL-USDT","XRP-USDT",
     "ADA-USDT","DOGE-USDT","DOT-USDT","MATIC-USDT","LINK-USDT",
@@ -85,7 +84,7 @@ def support_resistance_levels(df, lookback=20):
     return recent['High'].max(), recent['Low'].min()
 
 # ============================================================
-# SCORING (identical to live bot, with extra filters below)
+# SCORING – all 11 layers, re-weighted for higher selectivity
 # ============================================================
 def score_pair(df_4h, df_d, df_1h, btc_df_4h=None):
     layers = {}
@@ -120,15 +119,6 @@ def score_pair(df_4h, df_d, df_1h, btc_df_4h=None):
 
     direction = "LONG" if trend_daily == 1 else "SHORT"
 
-    # ---- HARD FILTER: BTC trend must align ----
-    if btc_df_4h is not None and len(btc_df_4h) >= 50:
-        btc_ema50 = ema(btc_df_4h['Close'], 50)
-        btc_trend_up = btc_df_4h['Close'].iloc[-1] > btc_ema50.iloc[-1]
-        if direction == "LONG" and not btc_trend_up:
-            return 0, None, None, None, None, {}
-        if direction == "SHORT" and btc_trend_up:
-            return 0, None, None, None, None, {}
-
     ema50_4h = ema(df_4h['Close'], 50)
     ema200_4h = ema(df_4h['Close'], 200)
     adx_val, di_plus, di_minus = adx(df_4h)
@@ -137,7 +127,7 @@ def score_pair(df_4h, df_d, df_1h, btc_df_4h=None):
     atr_val = atr(df_4h)
     res, sup = support_resistance_levels(df_4h, 20)
 
-    # 1H momentum with TIGHTER thresholds
+    # 1H momentum (original thresholds kept)
     rsi_1h_val = rsi(df_1h, 14)
     last_candle_1h = df_1h.iloc[-1]
     prev_candle_1h = df_1h.iloc[-2]
@@ -148,30 +138,44 @@ def score_pair(df_4h, df_d, df_1h, btc_df_4h=None):
     vol_avg = df_4h['Volume'].iloc[-6:-1].mean() if len(df_4h) >= 6 else vol_last
     vol_surge = vol_last > vol_avg * 1.2 if vol_avg > 0 else False
 
-    # BTC context for scoring (used for the Market layer, not as a filter)
-    market_aligned = True   # already enforced by the hard filter above
-    # We'll still give the Market layer full points if we passed the filter
-    # (no need to recompute)
+    # BTC context (soft layer, no hard filter)
+    market_aligned = False
+    if btc_df_4h is not None and len(btc_df_4h) >= 50:
+        btc_ema50 = ema(btc_df_4h['Close'], 50)
+        btc_trend_up = btc_df_4h['Close'].iloc[-1] > btc_ema50.iloc[-1]
+        if trend_daily == 1 and btc_trend_up:
+            market_aligned = True
+        elif trend_daily == -1 and not btc_trend_up:
+            market_aligned = True
 
     def bool_score(cond):
         return 1 if cond else 0
 
-    # Layers (same weights)
+    # ====== RE-WEIGHTED LAYERS (all 11 present) ======
+    # 1. EMA Align
     if direction == "LONG":
         ema_align = price > ema50_4h.iloc[-1] and ema50_4h.iloc[-1] > ema200_4h.iloc[-1]
     else:
         ema_align = price < ema50_4h.iloc[-1] and ema50_4h.iloc[-1] < ema200_4h.iloc[-1]
     layers["EMA Align"] = (bool_score(ema_align) * 1.5, 1.5, "OK")
+
+    # 2. ADX (increased weight to 1.5)
     adx_trending = adx_val > 20
     adx_dir = (di_plus > di_minus) if direction == "LONG" else (di_minus > di_plus)
-    layers["ADX"] = (bool_score(adx_trending and adx_dir) * 1.0, 1.0, "OK")
+    layers["ADX"] = (bool_score(adx_trending and adx_dir) * 1.5, 1.5, "OK")
+
+    # 3. RSI
     if rsi_val is not None:
         layers["RSI"] = (bool_score((direction == "LONG" and rsi_val > 50) or (direction == "SHORT" and rsi_val < 50)) * 1.5, 1.5, "OK")
     else:
         layers["RSI"] = (0, 1.5, "FAIL: RSI NaN")
+
+    # 4. MACD
     macd_expanding = (direction == "LONG" and macd_hist > 0 and macd_hist > macd_hist_prev) or \
                      (direction == "SHORT" and macd_hist < 0 and macd_hist < macd_hist_prev)
     layers["MACD"] = (bool_score(macd_expanding) * 1.0, 1.0, "OK")
+
+    # 5. S/R
     if atr_val and atr_val > 0:
         if direction == "LONG":
             sr_score = bool_score((price - sup) < atr_val * 0.5)
@@ -180,29 +184,38 @@ def score_pair(df_4h, df_d, df_1h, btc_df_4h=None):
         layers["S/R"] = (sr_score * 1.0, 1.0, "OK")
     else:
         layers["S/R"] = (0, 1.0, "FAIL: ATR missing")
+
+    # 6. Volume
     layers["Volume"] = (bool_score(vol_surge) * 0.5, 0.5, "OK")
-    # Market layer always full points because we already filtered
-    layers["Market"] = (0.5, 0.5, "OK")
 
-    # TIGHTER: candle momentum > 0.6 (long) or < -0.6 (short)
-    candle_ok = (bullish_momentum > 0.6) if direction == "LONG" else (bullish_momentum < -0.6)
-    layers["Candle Mom"] = (bool_score(candle_ok) * 2.0, 2.0, "OK")
+    # 7. Market
+    layers["Market"] = (bool_score(market_aligned) * 0.5, 0.5, "OK")
 
-    # TIGHTER RSI 1h bounds: long < 60, short > 40
+    # 8. Candle Mom (weight increased to 3.0)
+    candle_ok = (bullish_momentum > 0.5) if direction == "LONG" else (bullish_momentum < -0.5)
+    layers["Candle Mom"] = (bool_score(candle_ok) * 3.0, 3.0, "OK")
+
+    # 9. RSI 1h (weight increased to 2.0)
     if rsi_1h_val is not None:
-        rsi_1h_ok = (rsi_1h_val < 60) if direction == "LONG" else (rsi_1h_val > 40)
-        layers["RSI 1h"] = (bool_score(rsi_1h_ok) * 1.5, 1.5, "OK")
+        rsi_1h_ok = (rsi_1h_val < 63) if direction == "LONG" else (rsi_1h_val > 37)
+        layers["RSI 1h"] = (bool_score(rsi_1h_ok) * 2.0, 2.0, "OK")
     else:
-        layers["RSI 1h"] = (0, 1.5, "FAIL: RSI 1h NaN")
+        layers["RSI 1h"] = (0, 2.0, "FAIL: RSI 1h NaN")
+
+    # 10. ATR
     if atr_val and price > 0:
         layers["ATR"] = (bool_score(atr_val > price * 0.005) * 1.0, 1.0, "OK")
     else:
         layers["ATR"] = (0, 1.0, "FAIL: ATR missing")
+
+    # 11. Micro Trend (weight increased to 3.0)
     if direction == "LONG":
         micro_ok = last_candle_1h['Close'] > last_candle_1h['Open'] and prev_candle_1h['Close'] > prev_candle_1h['Open']
     else:
         micro_ok = last_candle_1h['Close'] < last_candle_1h['Open'] and prev_candle_1h['Close'] < prev_candle_1h['Open']
-    layers["Micro Trend"] = (bool_score(micro_ok) * 2.0, 2.0, "OK")
+    layers["Micro Trend"] = (bool_score(micro_ok) * 3.0, 3.0, "OK")
+
+    # Total max = 1.5+1.5+1.5+1.0+1.0+0.5+0.5+3.0+2.0+1.0+3.0 = 16.5
     total = sum(score for score, _, _ in layers.values() if isinstance(score, (int, float)))
     return total, direction, price, atr_val, (sup if direction == "LONG" else res), layers
 
@@ -254,7 +267,7 @@ def fetch_all_data():
             print(f"1H data exists for {pair}, skipping fetch.")
 
 # ============================================================
-# BACKTEST ENGINE (1:2 RR, HIGH SELECTIVITY)
+# BACKTEST ENGINE (1:2 RR, re-weighted layers, MIN_SCORE=7.0)
 # ============================================================
 def run_backtest():
     print("Loading data into memory...")
@@ -287,12 +300,11 @@ def run_backtest():
     trade_log = []
     equity_curve = []
 
-    # Minimum score threshold
-    MIN_SCORE = 7.5   # raised from 6.0
+    MIN_SCORE = 7.0   # higher than original 6.0, but not too strict
 
-    print(f"Running HIGH-SELECTIVITY 1:2 RR backtest from {start_date.date()} to {end_date.date()}...")
+    print(f"Running RE-WEIGHTED LAYERS 1:2 RR backtest from {start_date.date()} to {end_date.date()}...")
     print(f"Timeline length: {len(timeline)} 4H candles")
-    print(f"Min score: {MIN_SCORE}, tight 1H filters, BTC trend alignment required.")
+    print(f"Min score: {MIN_SCORE}, original 1H thresholds, no hard BTC filter, max score 16.5")
 
     for current_time in timeline:
         # ---- 1. Check existing trades ----
@@ -453,7 +465,7 @@ def run_backtest():
 
     summary = (
         f"\n{'='*50}\n"
-        f"BACKTEST RESULTS (1:2 RR, HIGH SELECTIVITY)\n"
+        f"BACKTEST RESULTS (1:2 RR, RE-WEIGHTED LAYERS)\n"
         f"{'='*50}\n"
         f"Period: {BACKTEST_START} → {datetime.now().strftime('%Y-%m-%d')}\n"
         f"Initial Balance: ${INITIAL_BALANCE:.2f}\n"
