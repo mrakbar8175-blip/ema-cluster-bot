@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-KuCoin Historical Backtester – 4H Dual Entry (Breakout + Pullback), 1:2 RR
-Frequent signals (top 50 coins), BTC trend filter, tight stops.
+KuCoin Historical Backtester – 4H Trend-Pullback Strategy, 1:2 RR
+Tight stop (1x ATR), enter at 50-EMA pullback with reversal candle.
+BTC trend filter. Top-50 coins.
 Usage: python backtest_ku.py FETCH    (download data)
        python backtest_ku.py BACKTEST (run simulation)
 """
@@ -22,7 +23,6 @@ RISK_PER_TRADE = 0.01
 MAX_RISKY_TRADES = 5
 DATA_FOLDER = "kucoin_data"
 
-# Full top‑50 liquid coins
 CRYPTO_PAIRS = [
     "BTC-USDT","ETH-USDT","BNB-USDT","SOL-USDT","XRP-USDT",
     "ADA-USDT","DOGE-USDT","DOT-USDT","MATIC-USDT","LINK-USDT",
@@ -48,85 +48,71 @@ def atr(df, period=14):
     return tr.rolling(period).mean().iloc[-1]
 
 # ============================================================
-# DUAL ENTRY LOGIC
+# TREND-PULLBACK ENTRY LOGIC
 # ============================================================
 def detect_entry(df_4h, btc_df_4h=None):
     """
     Returns (direction, entry_price, stop_loss, tp) or (None,None,None,None)
-    Checks breakout first, then pullback.
     """
-    if df_4h.empty or len(df_4h) < 50:
+    if df_4h.empty or len(df_4h) < 60:
         return None, None, None, None
 
     price = df_4h['Close'].iloc[-1]
-    volume = df_4h['Volume'].iloc[-1]
-    ema50 = ema(df_4h['Close'], 50).iloc[-1]
+    ema50 = ema(df_4h['Close'], 50)
+    ema200 = ema(df_4h['Close'], 200)
+    atr_val = atr(df_4h)
 
-    # BTC filter (hard)
+    if atr_val is None or pd.isna(atr_val) or atr_val <= 0:
+        return None, None, None, None
+
+    # Determine 4H trend
+    uptrend = price > ema50.iloc[-1] and ema50.iloc[-1] > ema200.iloc[-1]
+    downtrend = price < ema50.iloc[-1] and ema50.iloc[-1] < ema200.iloc[-1]
+
+    if not uptrend and not downtrend:
+        return None, None, None, None
+
+    # BTC filter
     if btc_df_4h is not None and len(btc_df_4h) >= 50:
         btc_ema50 = ema(btc_df_4h['Close'], 50)
         btc_trend_up = btc_df_4h['Close'].iloc[-1] > btc_ema50.iloc[-1]
     else:
         return None, None, None, None
 
-    # -------- 1) Breakout (shorter lookback) --------
-    recent = df_4h.iloc[-11:-1]   # previous 10 bars
-    if len(recent) >= 10:
-        range_high = recent['High'].max()
-        range_low = recent['Low'].min()
-        vol_avg = recent['Volume'].mean()
-        if vol_avg > 0 and volume > vol_avg:   # volume > average
-            if price > range_high and btc_trend_up:
-                direction = "LONG"
-                stop = range_low
+    # Look for pullback to EMA50 and reversal
+    last = df_4h.iloc[-1]
+    prev = df_4h.iloc[-2]
+
+    # ----- LONG SETUP -----
+    if uptrend and btc_trend_up:
+        # Check if price pulled back to near EMA50 (within 1.5 ATR)
+        if abs(prev['Low'] - ema50.iloc[-2]) < 1.5 * atr_val:
+            # Reversal candle: green candle closing above open, or long lower wick
+            is_reversal = (last['Close'] > last['Open']) or \
+                          (last['Low'] < prev['Low'] and last['Close'] > last['Open'])
+            if is_reversal:
                 entry = price
-            elif price < range_low and not btc_trend_up:
-                direction = "SHORT"
-                stop = range_high
+                stop = min(prev['Low'], ema50.iloc[-1] - 1.0 * atr_val)
+                # Ensure stop is not too close (at least 0.3*ATR)
+                if entry - stop < 0.3 * atr_val:
+                    return None, None, None, None
+                risk = entry - stop
+                tp = entry + 2 * risk
+                return "LONG", entry, stop, tp
+
+    # ----- SHORT SETUP -----
+    if downtrend and not btc_trend_up:
+        if abs(prev['High'] - ema50.iloc[-2]) < 1.5 * atr_val:
+            is_reversal = (last['Close'] < last['Open']) or \
+                          (last['High'] > prev['High'] and last['Close'] < last['Open'])
+            if is_reversal:
                 entry = price
-            else:
-                direction = None
-
-            if direction:
-                risk = abs(entry - stop)
-                if risk > 0:
-                    tp = entry + 2*risk if direction == "LONG" else entry - 2*risk
-                    return direction, entry, stop, tp
-
-    # -------- 2) Pullback to EMA50 --------
-    if price > ema50 and btc_trend_up:
-        # Long pullback
-        atr_val = atr(df_4h)
-        if atr_val and not pd.isna(atr_val):
-            # Check if price recently dipped near EMA50 and now closing back above it
-            low = df_4h['Low'].iloc[-1]
-            open = df_4h['Open'].iloc[-1]
-            close = df_4h['Close'].iloc[-1]
-            # Candle closed green and touched near EMA
-            if close > open and low <= ema50 + 0.5*atr_val and low >= ema50 - 1.5*atr_val:
-                direction = "LONG"
-                entry = close
-                stop = min(low, ema50 - 1.0*atr_val)   # below recent low
-                risk = abs(entry - stop)
-                if risk > 0:
-                    tp = entry + 2*risk
-                    return direction, entry, stop, tp
-
-    elif price < ema50 and not btc_trend_up:
-        # Short pullback
-        atr_val = atr(df_4h)
-        if atr_val and not pd.isna(atr_val):
-            high = df_4h['High'].iloc[-1]
-            open = df_4h['Open'].iloc[-1]
-            close = df_4h['Close'].iloc[-1]
-            if close < open and high >= ema50 - 0.5*atr_val and high <= ema50 + 1.5*atr_val:
-                direction = "SHORT"
-                entry = close
-                stop = max(high, ema50 + 1.0*atr_val)
-                risk = abs(entry - stop)
-                if risk > 0:
-                    tp = entry - 2*risk
-                    return direction, entry, stop, tp
+                stop = max(prev['High'], ema50.iloc[-1] + 1.0 * atr_val)
+                if stop - entry < 0.3 * atr_val:
+                    return None, None, None, None
+                risk = stop - entry
+                tp = entry - 2 * risk
+                return "SHORT", entry, stop, tp
 
     return None, None, None, None
 
@@ -200,7 +186,7 @@ def run_backtest():
     trade_log = []
     equity_curve = []
 
-    print(f"Running DUAL ENTRY 1:2 RR BACKTEST from {start_date.date()} to {end_date.date()}...")
+    print(f"Running TREND-PULLBACK 1:2 RR BACKTEST...")
     print(f"Timeline: {len(timeline)} 4H candles")
 
     for current_time in timeline:
@@ -255,7 +241,7 @@ def run_backtest():
         for idx in sorted(closed_indices, reverse=True):
             open_trades.pop(idx)
 
-        # ---- 2. Generate new signals (multiple allowed) ----
+        # ---- 2. Generate new signals ----
         risky_count = len(open_trades)
         if risky_count < MAX_RISKY_TRADES:
             open_symbols = {t['symbol'] for t in open_trades}
@@ -281,7 +267,7 @@ def run_backtest():
                     'quantity': quantity,
                     'original_qty': quantity
                 })
-            # Take all eligible trades up to the limit
+            # Add trades up to limit
             for trade in candidates:
                 if risky_count >= MAX_RISKY_TRADES:
                     break
@@ -379,7 +365,7 @@ def run_backtest():
 
     summary = (
         f"\n{'='*50}\n"
-        f"BACKTEST RESULTS (DUAL ENTRY, 1:2 RR)\n"
+        f"BACKTEST RESULTS (TREND-PULLBACK, 1:2 RR)\n"
         f"{'='*50}\n"
         f"Period: {BACKTEST_START} → {datetime.now().strftime('%Y-%m-%d')}\n"
         f"Initial Balance: ${INITIAL_BALANCE:.2f}\n"
