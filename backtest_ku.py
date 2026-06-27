@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-KuCoin Historical Backtester – 4H & 1H data, single 1:2 risk-reward (2R TP)
+KuCoin Historical Backtester – 4H & 1H data, 1:2 RR, HIGH SELECTIVITY
 Usage: python backtest_ku.py FETCH    (download data)
        python backtest_ku.py BACKTEST (run simulation)
 """
@@ -21,7 +21,7 @@ RISK_PER_TRADE = 0.01     # 1% risk
 MAX_RISKY_TRADES = 5
 DATA_FOLDER = "kucoin_data"
 
-# Top‑50 coins (same as live bot)
+# Top‑50 coins
 CRYPTO_PAIRS = [
     "BTC-USDT","ETH-USDT","BNB-USDT","SOL-USDT","XRP-USDT",
     "ADA-USDT","DOGE-USDT","DOT-USDT","MATIC-USDT","LINK-USDT",
@@ -36,7 +36,7 @@ CRYPTO_PAIRS = [
 ]
 
 # ============================================================
-# TECHNICAL INDICATORS (exact same as live bot)
+# TECHNICAL INDICATORS (unchanged)
 # ============================================================
 def ema(series, period):
     return series.ewm(span=period, adjust=False).mean()
@@ -85,7 +85,7 @@ def support_resistance_levels(df, lookback=20):
     return recent['High'].max(), recent['Low'].min()
 
 # ============================================================
-# SCORING (identical to live bot – 4H + daily + 1H)
+# SCORING (identical to live bot, with extra filters below)
 # ============================================================
 def score_pair(df_4h, df_d, df_1h, btc_df_4h=None):
     layers = {}
@@ -120,6 +120,15 @@ def score_pair(df_4h, df_d, df_1h, btc_df_4h=None):
 
     direction = "LONG" if trend_daily == 1 else "SHORT"
 
+    # ---- HARD FILTER: BTC trend must align ----
+    if btc_df_4h is not None and len(btc_df_4h) >= 50:
+        btc_ema50 = ema(btc_df_4h['Close'], 50)
+        btc_trend_up = btc_df_4h['Close'].iloc[-1] > btc_ema50.iloc[-1]
+        if direction == "LONG" and not btc_trend_up:
+            return 0, None, None, None, None, {}
+        if direction == "SHORT" and btc_trend_up:
+            return 0, None, None, None, None, {}
+
     ema50_4h = ema(df_4h['Close'], 50)
     ema200_4h = ema(df_4h['Close'], 200)
     adx_val, di_plus, di_minus = adx(df_4h)
@@ -128,7 +137,7 @@ def score_pair(df_4h, df_d, df_1h, btc_df_4h=None):
     atr_val = atr(df_4h)
     res, sup = support_resistance_levels(df_4h, 20)
 
-    # 1H momentum
+    # 1H momentum with TIGHTER thresholds
     rsi_1h_val = rsi(df_1h, 14)
     last_candle_1h = df_1h.iloc[-1]
     prev_candle_1h = df_1h.iloc[-2]
@@ -139,22 +148,15 @@ def score_pair(df_4h, df_d, df_1h, btc_df_4h=None):
     vol_avg = df_4h['Volume'].iloc[-6:-1].mean() if len(df_4h) >= 6 else vol_last
     vol_surge = vol_last > vol_avg * 1.2 if vol_avg > 0 else False
 
-    # BTC context
-    market_aligned = False
-    if btc_df_4h is not None and len(btc_df_4h) >= 50:
-        btc_ema50 = ema(btc_df_4h['Close'], 50)
-        btc_trend_up = btc_df_4h['Close'].iloc[-1] > btc_ema50.iloc[-1]
-        if trend_daily == 1 and btc_trend_up:
-            market_aligned = True
-        elif trend_daily == -1 and not btc_trend_up:
-            market_aligned = True
-    else:
-        layers["Market"] = (0, 0.5, "FAIL: BTC data unavailable")
+    # BTC context for scoring (used for the Market layer, not as a filter)
+    market_aligned = True   # already enforced by the hard filter above
+    # We'll still give the Market layer full points if we passed the filter
+    # (no need to recompute)
 
     def bool_score(cond):
         return 1 if cond else 0
 
-    # Layers
+    # Layers (same weights)
     if direction == "LONG":
         ema_align = price > ema50_4h.iloc[-1] and ema50_4h.iloc[-1] > ema200_4h.iloc[-1]
     else:
@@ -179,12 +181,16 @@ def score_pair(df_4h, df_d, df_1h, btc_df_4h=None):
     else:
         layers["S/R"] = (0, 1.0, "FAIL: ATR missing")
     layers["Volume"] = (bool_score(vol_surge) * 0.5, 0.5, "OK")
-    if "Market" not in layers:
-        layers["Market"] = (bool_score(market_aligned) * 0.5, 0.5, "OK")
-    candle_ok = (bullish_momentum > 0.5) if direction == "LONG" else (bullish_momentum < -0.5)
+    # Market layer always full points because we already filtered
+    layers["Market"] = (0.5, 0.5, "OK")
+
+    # TIGHTER: candle momentum > 0.6 (long) or < -0.6 (short)
+    candle_ok = (bullish_momentum > 0.6) if direction == "LONG" else (bullish_momentum < -0.6)
     layers["Candle Mom"] = (bool_score(candle_ok) * 2.0, 2.0, "OK")
+
+    # TIGHTER RSI 1h bounds: long < 60, short > 40
     if rsi_1h_val is not None:
-        rsi_1h_ok = (rsi_1h_val < 63) if direction == "LONG" else (rsi_1h_val > 37)
+        rsi_1h_ok = (rsi_1h_val < 60) if direction == "LONG" else (rsi_1h_val > 40)
         layers["RSI 1h"] = (bool_score(rsi_1h_ok) * 1.5, 1.5, "OK")
     else:
         layers["RSI 1h"] = (0, 1.5, "FAIL: RSI 1h NaN")
@@ -201,7 +207,7 @@ def score_pair(df_4h, df_d, df_1h, btc_df_4h=None):
     return total, direction, price, atr_val, (sup if direction == "LONG" else res), layers
 
 # ============================================================
-# DATA FETCHING
+# DATA FETCHING (unchanged)
 # ============================================================
 def fetch_and_save(symbol_ccxt, timeframe, days_back=DAYS_HISTORY):
     exchange = ccxt.kucoin({'enableRateLimit': True})
@@ -248,7 +254,7 @@ def fetch_all_data():
             print(f"1H data exists for {pair}, skipping fetch.")
 
 # ============================================================
-# BACKTEST ENGINE (1:2 RR, single TP)
+# BACKTEST ENGINE (1:2 RR, HIGH SELECTIVITY)
 # ============================================================
 def run_backtest():
     print("Loading data into memory...")
@@ -281,11 +287,15 @@ def run_backtest():
     trade_log = []
     equity_curve = []
 
-    print(f"Running 1:2 RR backtest from {start_date.date()} to {end_date.date()}...")
+    # Minimum score threshold
+    MIN_SCORE = 7.5   # raised from 6.0
+
+    print(f"Running HIGH-SELECTIVITY 1:2 RR backtest from {start_date.date()} to {end_date.date()}...")
     print(f"Timeline length: {len(timeline)} 4H candles")
+    print(f"Min score: {MIN_SCORE}, tight 1H filters, BTC trend alignment required.")
 
     for current_time in timeline:
-        # ---- 1. Check existing trades (single TP/SL) ----
+        # ---- 1. Check existing trades ----
         closed_indices = []
         for idx, trade in enumerate(open_trades):
             sym = trade['symbol']
@@ -336,7 +346,7 @@ def run_backtest():
         for idx in sorted(closed_indices, reverse=True):
             open_trades.pop(idx)
 
-        # ---- 2. Generate new signals (under max risky limit) ----
+        # ---- 2. Generate new signals ----
         risky_count = len(open_trades)
         if risky_count < MAX_RISKY_TRADES:
             open_symbols = {t['symbol'] for t in open_trades}
@@ -351,7 +361,7 @@ def run_backtest():
                     continue
                 btc_ctx = btc_4h.loc[:current_time] if btc_4h is not None else None
                 score, direction, price, atr_val, swing_level, layers = score_pair(df_4h, df_d, df_1h, btc_ctx)
-                if direction is None or score < 6.0:
+                if direction is None or score < MIN_SCORE:
                     continue
 
                 # Compute stop and TP (2R)
@@ -417,7 +427,6 @@ def run_backtest():
         return
 
     trades_df = pd.DataFrame(trade_log)
-    # Group by (timestamp, symbol) to get full trade PnL
     trade_groups = trades_df.groupby(['timestamp', 'symbol'])
     full_trades = []
     for (ts, sym), group in trade_groups:
@@ -437,7 +446,6 @@ def run_backtest():
     profit_factor = wins['total_pnl'].sum() / abs(losses['total_pnl'].sum()) if len(losses) > 0 else float('inf')
     final_balance = INITIAL_BALANCE + total_pnl
 
-    # Drawdown
     equity_df = pd.DataFrame(equity_curve, columns=['time', 'balance'])
     equity_df['peak'] = equity_df['balance'].cummax()
     equity_df['drawdown'] = (equity_df['peak'] - equity_df['balance']) / equity_df['peak']
@@ -445,7 +453,7 @@ def run_backtest():
 
     summary = (
         f"\n{'='*50}\n"
-        f"BACKTEST RESULTS (1:2 RR)\n"
+        f"BACKTEST RESULTS (1:2 RR, HIGH SELECTIVITY)\n"
         f"{'='*50}\n"
         f"Period: {BACKTEST_START} → {datetime.now().strftime('%Y-%m-%d')}\n"
         f"Initial Balance: ${INITIAL_BALANCE:.2f}\n"
