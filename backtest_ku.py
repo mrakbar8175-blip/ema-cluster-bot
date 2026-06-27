@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-KuCoin Historical Backtester – 4H & 1H data, 1:2 RR, RE-WEIGHTED LAYERS
+KuCoin Historical Backtester – 4H & 1H data, 1:2 RR, ORIGINAL WEIGHTS, SOFT BTC FILTER
 Usage: python backtest_ku.py FETCH    (download data)
        python backtest_ku.py BACKTEST (run simulation)
 """
@@ -8,7 +8,7 @@ Usage: python backtest_ku.py FETCH    (download data)
 import ccxt
 import pandas as pd
 import numpy as np
-import os, sys, time, math, traceback
+import os, sys, time, math
 from datetime import datetime, timedelta
 
 # ============================================================
@@ -35,7 +35,7 @@ CRYPTO_PAIRS = [
 ]
 
 # ============================================================
-# TECHNICAL INDICATORS (unchanged)
+# TECHNICAL INDICATORS
 # ============================================================
 def ema(series, period):
     return series.ewm(span=period, adjust=False).mean()
@@ -84,7 +84,7 @@ def support_resistance_levels(df, lookback=20):
     return recent['High'].max(), recent['Low'].min()
 
 # ============================================================
-# SCORING – all 11 layers, re-weighted for higher selectivity
+# SCORING – ORIGINAL WEIGHTS, with soft BTC penalty
 # ============================================================
 def score_pair(df_4h, df_d, df_1h, btc_df_4h=None):
     layers = {}
@@ -127,7 +127,7 @@ def score_pair(df_4h, df_d, df_1h, btc_df_4h=None):
     atr_val = atr(df_4h)
     res, sup = support_resistance_levels(df_4h, 20)
 
-    # 1H momentum (original thresholds kept)
+    # 1H momentum
     rsi_1h_val = rsi(df_1h, 14)
     last_candle_1h = df_1h.iloc[-1]
     prev_candle_1h = df_1h.iloc[-2]
@@ -138,7 +138,8 @@ def score_pair(df_4h, df_d, df_1h, btc_df_4h=None):
     vol_avg = df_4h['Volume'].iloc[-6:-1].mean() if len(df_4h) >= 6 else vol_last
     vol_surge = vol_last > vol_avg * 1.2 if vol_avg > 0 else False
 
-    # BTC context (soft layer, no hard filter)
+    # BTC context (soft penalty)
+    btc_penalty = 0.0
     market_aligned = False
     if btc_df_4h is not None and len(btc_df_4h) >= 50:
         btc_ema50 = ema(btc_df_4h['Close'], 50)
@@ -147,35 +148,29 @@ def score_pair(df_4h, df_d, df_1h, btc_df_4h=None):
             market_aligned = True
         elif trend_daily == -1 and not btc_trend_up:
             market_aligned = True
+        # Soft penalty: if direction is opposite to BTC, subtract 1.0 from final score
+        if (direction == "LONG" and not btc_trend_up) or (direction == "SHORT" and btc_trend_up):
+            btc_penalty = 1.0
 
     def bool_score(cond):
         return 1 if cond else 0
 
-    # ====== RE-WEIGHTED LAYERS (all 11 present) ======
-    # 1. EMA Align
+    # ====== ORIGINAL LAYER WEIGHTS (max 13.5) ======
     if direction == "LONG":
         ema_align = price > ema50_4h.iloc[-1] and ema50_4h.iloc[-1] > ema200_4h.iloc[-1]
     else:
         ema_align = price < ema50_4h.iloc[-1] and ema50_4h.iloc[-1] < ema200_4h.iloc[-1]
     layers["EMA Align"] = (bool_score(ema_align) * 1.5, 1.5, "OK")
-
-    # 2. ADX (increased weight to 1.5)
     adx_trending = adx_val > 20
     adx_dir = (di_plus > di_minus) if direction == "LONG" else (di_minus > di_plus)
-    layers["ADX"] = (bool_score(adx_trending and adx_dir) * 1.5, 1.5, "OK")
-
-    # 3. RSI
+    layers["ADX"] = (bool_score(adx_trending and adx_dir) * 1.0, 1.0, "OK")
     if rsi_val is not None:
         layers["RSI"] = (bool_score((direction == "LONG" and rsi_val > 50) or (direction == "SHORT" and rsi_val < 50)) * 1.5, 1.5, "OK")
     else:
         layers["RSI"] = (0, 1.5, "FAIL: RSI NaN")
-
-    # 4. MACD
     macd_expanding = (direction == "LONG" and macd_hist > 0 and macd_hist > macd_hist_prev) or \
                      (direction == "SHORT" and macd_hist < 0 and macd_hist < macd_hist_prev)
     layers["MACD"] = (bool_score(macd_expanding) * 1.0, 1.0, "OK")
-
-    # 5. S/R
     if atr_val and atr_val > 0:
         if direction == "LONG":
             sr_score = bool_score((price - sup) < atr_val * 0.5)
@@ -184,39 +179,27 @@ def score_pair(df_4h, df_d, df_1h, btc_df_4h=None):
         layers["S/R"] = (sr_score * 1.0, 1.0, "OK")
     else:
         layers["S/R"] = (0, 1.0, "FAIL: ATR missing")
-
-    # 6. Volume
     layers["Volume"] = (bool_score(vol_surge) * 0.5, 0.5, "OK")
-
-    # 7. Market
     layers["Market"] = (bool_score(market_aligned) * 0.5, 0.5, "OK")
-
-    # 8. Candle Mom (weight increased to 3.0)
     candle_ok = (bullish_momentum > 0.5) if direction == "LONG" else (bullish_momentum < -0.5)
-    layers["Candle Mom"] = (bool_score(candle_ok) * 3.0, 3.0, "OK")
-
-    # 9. RSI 1h (weight increased to 2.0)
+    layers["Candle Mom"] = (bool_score(candle_ok) * 2.0, 2.0, "OK")
     if rsi_1h_val is not None:
         rsi_1h_ok = (rsi_1h_val < 63) if direction == "LONG" else (rsi_1h_val > 37)
-        layers["RSI 1h"] = (bool_score(rsi_1h_ok) * 2.0, 2.0, "OK")
+        layers["RSI 1h"] = (bool_score(rsi_1h_ok) * 1.5, 1.5, "OK")
     else:
-        layers["RSI 1h"] = (0, 2.0, "FAIL: RSI 1h NaN")
-
-    # 10. ATR
+        layers["RSI 1h"] = (0, 1.5, "FAIL: RSI 1h NaN")
     if atr_val and price > 0:
         layers["ATR"] = (bool_score(atr_val > price * 0.005) * 1.0, 1.0, "OK")
     else:
         layers["ATR"] = (0, 1.0, "FAIL: ATR missing")
-
-    # 11. Micro Trend (weight increased to 3.0)
     if direction == "LONG":
         micro_ok = last_candle_1h['Close'] > last_candle_1h['Open'] and prev_candle_1h['Close'] > prev_candle_1h['Open']
     else:
         micro_ok = last_candle_1h['Close'] < last_candle_1h['Open'] and prev_candle_1h['Close'] < prev_candle_1h['Open']
-    layers["Micro Trend"] = (bool_score(micro_ok) * 3.0, 3.0, "OK")
-
-    # Total max = 1.5+1.5+1.5+1.0+1.0+0.5+0.5+3.0+2.0+1.0+3.0 = 16.5
+    layers["Micro Trend"] = (bool_score(micro_ok) * 2.0, 2.0, "OK")
     total = sum(score for score, _, _ in layers.values() if isinstance(score, (int, float)))
+    total -= btc_penalty   # soft penalty
+    total = max(total, 0.0)
     return total, direction, price, atr_val, (sup if direction == "LONG" else res), layers
 
 # ============================================================
@@ -267,7 +250,7 @@ def fetch_all_data():
             print(f"1H data exists for {pair}, skipping fetch.")
 
 # ============================================================
-# BACKTEST ENGINE (1:2 RR, re-weighted layers, MIN_SCORE=7.0)
+# BACKTEST ENGINE (1:2 RR, ORIGINAL WEIGHTS, SOFT BTC, MIN_SCORE=7.5)
 # ============================================================
 def run_backtest():
     print("Loading data into memory...")
@@ -300,11 +283,10 @@ def run_backtest():
     trade_log = []
     equity_curve = []
 
-    MIN_SCORE = 7.0   # higher than original 6.0, but not too strict
+    MIN_SCORE = 7.5   # out of 13.5 (55.6% required)
 
-    print(f"Running RE-WEIGHTED LAYERS 1:2 RR backtest from {start_date.date()} to {end_date.date()}...")
+    print(f"Running BACKTEST (orig weights, soft BTC, min score {MIN_SCORE})...")
     print(f"Timeline length: {len(timeline)} 4H candles")
-    print(f"Min score: {MIN_SCORE}, original 1H thresholds, no hard BTC filter, max score 16.5")
 
     for current_time in timeline:
         # ---- 1. Check existing trades ----
@@ -433,7 +415,7 @@ def run_backtest():
             })
             balance += pnl
 
-    # Performance metrics
+    # Performance metrics with streaks
     if not trade_log:
         print("No trades were generated.")
         return
@@ -449,9 +431,48 @@ def run_backtest():
             'total_pnl': total_pnl,
             'action': group['action'].iloc[0]
         })
-    full_df = pd.DataFrame(full_trades)
-    wins = full_df[full_df['total_pnl'] > 0]
-    losses = full_df[full_df['total_pnl'] < 0]
+    full_df = pd.DataFrame(full_trades).sort_values('entry_time')
+    full_df['is_win'] = full_df['total_pnl'] > 0
+    full_df['is_loss'] = full_df['total_pnl'] < 0
+
+    # Streaks
+    curr_win_streak = 0
+    curr_loss_streak = 0
+    longest_win_streak = 0
+    longest_loss_streak = 0
+    win_streak_buf = 0
+    loss_streak_buf = 0
+    for _, row in full_df.iterrows():
+        if row['is_win']:
+            win_streak_buf += 1
+            loss_streak_buf = 0
+            longest_win_streak = max(longest_win_streak, win_streak_buf)
+        elif row['is_loss']:
+            loss_streak_buf += 1
+            win_streak_buf = 0
+            longest_loss_streak = max(longest_loss_streak, loss_streak_buf)
+        else:
+            win_streak_buf = 0
+            loss_streak_buf = 0
+    # Current streaks from the end
+    curr_win_streak = 0
+    curr_loss_streak = 0
+    for _, row in full_df.iloc[::-1].iterrows():
+        if row['is_win']:
+            if curr_loss_streak == 0:
+                curr_win_streak += 1
+            else:
+                break
+        elif row['is_loss']:
+            if curr_win_streak == 0:
+                curr_loss_streak += 1
+            else:
+                break
+        else:
+            break
+
+    wins = full_df[full_df['is_win']]
+    losses = full_df[full_df['is_loss']]
     total_trades = len(full_df)
     total_pnl = full_df['total_pnl'].sum()
     winrate = (len(wins) / max(total_trades, 1)) * 100
@@ -465,7 +486,7 @@ def run_backtest():
 
     summary = (
         f"\n{'='*50}\n"
-        f"BACKTEST RESULTS (1:2 RR, RE-WEIGHTED LAYERS)\n"
+        f"BACKTEST RESULTS (1:2 RR, SOFT BTC FILTER, MIN SCORE 7.5)\n"
         f"{'='*50}\n"
         f"Period: {BACKTEST_START} → {datetime.now().strftime('%Y-%m-%d')}\n"
         f"Initial Balance: ${INITIAL_BALANCE:.2f}\n"
@@ -475,6 +496,10 @@ def run_backtest():
         f"Total P&L: ${total_pnl:.2f}\n"
         f"Profit Factor: {profit_factor:.2f}\n"
         f"Max Drawdown: {max_drawdown:.2f}%\n"
+        f"Current Win Streak: {curr_win_streak} 🔥\n"
+        f"Current Loss Streak: {curr_loss_streak} 😞\n"
+        f"Longest Win Streak: {longest_win_streak}\n"
+        f"Longest Loss Streak: {longest_loss_streak}\n"
         f"Average R per trade: {total_pnl/(total_trades*INITIAL_BALANCE*RISK_PER_TRADE):.2f}\n"
         f"{'='*50}"
     )
