@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-KuCoin Historical Backtester – Ultra‑Selective Engulfing Pullback, 1:2 RR
-Strong trend (ADX>30), RSI neutral, engulfing candle at EMA50.
-Ultra‑tight stop below engulfing bar, 2R target.
+KuCoin Historical Backtester – MACD Zero‑Line Crossover + 200 EMA, 1:2 RR
+Tight stop: min(5-bar swing low, 1.5 ATR) for longs, max(5-bar swing high, 1.5 ATR) for shorts
 Usage: python backtest_ku.py FETCH    (download data)
        python backtest_ku.py BACKTEST (run simulation)
 """
@@ -21,6 +20,7 @@ BACKTEST_START = "2025-01-01"
 INITIAL_BALANCE = 1000.0
 RISK_PER_TRADE = 0.01
 MAX_RISKY_TRADES = 5
+BTC_FILTER = True          # set to False to disable BTC trend filter
 DATA_FOLDER = "kucoin_data"
 
 CRYPTO_PAIRS = [
@@ -47,101 +47,72 @@ def atr(df, period=14):
     tr = pd.concat([h - l, (h - c.shift()).abs(), (l - c.shift()).abs()], axis=1).max(axis=1)
     return tr.rolling(period).mean().iloc[-1]
 
-def rsi(df, period=14):
-    delta = df['Close'].diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
-    avg_gain = gain.ewm(alpha=1/period, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1/period, adjust=False).mean()
-    rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs)).iloc[-1]
-
-def adx(df, period=14):
-    h, l, c = df['High'], df['Low'], df['Close']
-    dm_plus = h.diff()
-    dm_minus = -l.diff()
-    dm_plus[dm_plus < 0] = 0
-    dm_minus[dm_minus < 0] = 0
-    tr = pd.concat([h - l, (h - c.shift()).abs(), (l - c.shift()).abs()], axis=1).max(axis=1)
-    atr_val = tr.ewm(alpha=1/period, adjust=False).mean()
-    di_plus = 100 * (dm_plus.ewm(alpha=1/period, adjust=False).mean() / atr_val)
-    di_minus = 100 * (dm_minus.ewm(alpha=1/period, adjust=False).mean() / atr_val)
-    dx = 100 * (di_plus - di_minus).abs() / (di_plus + di_minus)
-    return dx.ewm(alpha=1/period, adjust=False).mean().iloc[-1]
+def macd(series, fast=12, slow=26, signal=9):
+    exp1 = series.ewm(span=fast, adjust=False).mean()
+    exp2 = series.ewm(span=slow, adjust=False).mean()
+    macd_line = exp1 - exp2
+    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+    return macd_line, signal_line
 
 # ============================================================
-# ULTRA‑SELECTIVE ENTRY
+# MACD ZERO‑LINE CROSSOVER + 200 EMA ENTRY
 # ============================================================
 def detect_entry(df_4h, btc_df_4h=None):
+    """
+    Returns (direction, entry_price, stop_loss, tp) or (None,None,None,None)
+    """
     if df_4h.empty or len(df_4h) < 80:
         return None, None, None, None
 
     price = df_4h['Close'].iloc[-1]
-    ema50 = ema(df_4h['Close'], 50).iloc[-1]
     ema200 = ema(df_4h['Close'], 200).iloc[-1]
     atr_val = atr(df_4h)
-    rsi_val = rsi(df_4h)
-    adx_val = adx(df_4h)
 
-    if any(v is None or pd.isna(v) for v in [atr_val, rsi_val, adx_val]) or atr_val <= 0:
+    if atr_val is None or pd.isna(atr_val) or atr_val <= 0:
         return None, None, None, None
 
-    # Strong trend
-    uptrend = price > ema50 and ema50 > ema200 and adx_val > 30
-    downtrend = price < ema50 and ema50 < ema200 and adx_val > 30
-    if not uptrend and not downtrend:
-        return None, None, None, None
+    # MACD calculation
+    macd_line, macd_signal = macd(df_4h['Close'])
+    macd_curr = macd_line.iloc[-1]
+    macd_prev = macd_line.iloc[-2]
+    sig_curr = macd_signal.iloc[-1]
+    sig_prev = macd_signal.iloc[-2]
 
-    # RSI neutral
-    if not (45 <= rsi_val <= 55):
-        return None, None, None, None
-
-    # BTC filter
-    if btc_df_4h is not None and len(btc_df_4h) >= 50:
+    # BTC filter (optional)
+    if BTC_FILTER and btc_df_4h is not None and len(btc_df_4h) >= 50:
         btc_ema50 = ema(btc_df_4h['Close'], 50).iloc[-1]
         btc_trend_up = btc_df_4h['Close'].iloc[-1] > btc_ema50
     else:
-        return None, None, None, None
+        btc_trend_up = True
+        btc_trend_down = True
 
-    # Volume > average
-    vol_last = df_4h['Volume'].iloc[-1]
-    if len(df_4h) >= 21:
-        vol_avg = df_4h['Volume'].iloc[-21:-1].mean()
-        if vol_last < vol_avg * 1.2:
-            return None, None, None, None
-    else:
-        return None, None, None, None
-
-    last = df_4h.iloc[-1]
-    prev = df_4h.iloc[-2]
-
-    # ---- Engulfing pattern at EMA50 ----
-    if uptrend and btc_trend_up:
-        # Check pullback to EMA50
-        if abs(price - ema50) > 0.5 * atr_val:
-            return None, None, None, None
-        # Bullish engulfing: prev red, current green, current body engulfs prev body
-        if prev['Close'] < prev['Open'] and last['Close'] > last['Open'] \
-                and last['Open'] <= prev['Close'] and last['Close'] >= prev['Open']:
-            entry = price
-            stop = last['Low'] - 0.2 * atr_val   # ultra‑tight
-            if entry - stop <= 0:
+    # ----- LONG SIGNAL -----
+    if price > ema200 and macd_curr < 0 and sig_curr < 0:
+        if macd_prev < sig_prev and macd_curr > sig_curr:   # crossover up
+            if BTC_FILTER and not btc_trend_up:
                 return None, None, None, None
-            tp = entry + 2 * (entry - stop)
-            return "LONG", entry, stop, tp
-
-    if downtrend and not btc_trend_up:
-        if abs(price - ema50) > 0.5 * atr_val:
-            return None, None, None, None
-        # Bearish engulfing: prev green, current red, current body engulfs prev body
-        if prev['Close'] > prev['Open'] and last['Close'] < last['Open'] \
-                and last['Open'] >= prev['Close'] and last['Close'] <= prev['Open']:
-            entry = price
-            stop = last['High'] + 0.2 * atr_val
-            if stop - entry <= 0:
+            # Stop = min(5-bar swing low, entry - 1.5*ATR)
+            swing_low = df_4h['Low'].iloc[-6:-1].min()   # last 5 bars excluding current
+            stop_atr = price - 1.5 * atr_val
+            stop = max(swing_low, stop_atr)   # choose the higher (tighter) stop
+            if price - stop <= 0:
                 return None, None, None, None
-            tp = entry - 2 * (stop - entry)
-            return "SHORT", entry, stop, tp
+            tp = price + 2 * (price - stop)
+            return "LONG", price, stop, tp
+
+    # ----- SHORT SIGNAL -----
+    if price < ema200 and macd_curr > 0 and sig_curr > 0:
+        if macd_prev > sig_prev and macd_curr < sig_curr:   # crossover down
+            if BTC_FILTER and btc_trend_up:
+                return None, None, None, None
+            # Stop = max(5-bar swing high, entry + 1.5*ATR)
+            swing_high = df_4h['High'].iloc[-6:-1].max()
+            stop_atr = price + 1.5 * atr_val
+            stop = min(swing_high, stop_atr)   # choose the lower (tighter) stop
+            if stop - price <= 0:
+                return None, None, None, None
+            tp = price - 2 * (stop - price)
+            return "SHORT", price, stop, tp
 
     return None, None, None, None
 
@@ -215,7 +186,7 @@ def run_backtest():
     trade_log = []
     equity_curve = []
 
-    print(f"Running ULTRA‑SELECTIVE ENGULFING PULLBACK (1:2 RR) from {start_date.date()} to {end_date.date()}...")
+    print(f"Running MACD Zero‑Line Crossover + 200 EMA (Tight Stop) from {start_date.date()} to {end_date.date()}...")
     print(f"Timeline: {len(timeline)} 4H candles")
 
     for current_time in timeline:
@@ -279,7 +250,7 @@ def run_backtest():
                 if sym_yahoo in open_symbols:
                     continue
                 df_4h = sym_data['4h'].loc[:current_time]
-                btc_ctx = btc_4h.loc[:current_time]
+                btc_ctx = btc_4h.loc[:current_time] if BTC_FILTER else None
                 direction, entry, stop, tp = detect_entry(df_4h, btc_ctx)
                 if direction is None:
                     continue
@@ -343,6 +314,7 @@ def run_backtest():
     full_df['is_win'] = full_df['total_pnl'] > 0
     full_df['is_loss'] = full_df['total_pnl'] < 0
 
+    # Streaks
     curr_win_streak = 0
     curr_loss_streak = 0
     longest_win_streak = 0
@@ -390,7 +362,7 @@ def run_backtest():
 
     summary = (
         f"\n{'='*50}\n"
-        f"BACKTEST RESULTS (ULTRA‑SELECTIVE ENGULFING, 1:2 RR)\n"
+        f"BACKTEST RESULTS (MACD Zero‑Line Crossover + 200 EMA, Tight Stop)\n"
         f"{'='*50}\n"
         f"Period: {BACKTEST_START} → {datetime.now().strftime('%Y-%m-%d')}\n"
         f"Initial Balance: ${INITIAL_BALANCE:.2f}\n"
