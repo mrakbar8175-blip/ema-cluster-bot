@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-KuCoin Historical Backtester – 4H Breakout Strategy, 1:2 RR
-Volume‑confirmed breakout from 20‑bar range (excluding current bar).
-BTC trend filter. Top‑20 liquid coins.
+KuCoin Historical Backtester – 4H Dual Entry (Breakout + Pullback), 1:2 RR
+Frequent signals (top 50 coins), BTC trend filter, tight stops.
 Usage: python backtest_ku.py FETCH    (download data)
        python backtest_ku.py BACKTEST (run simulation)
 """
@@ -23,12 +22,18 @@ RISK_PER_TRADE = 0.01
 MAX_RISKY_TRADES = 5
 DATA_FOLDER = "kucoin_data"
 
-# Top‑20 most liquid coins
+# Full top‑50 liquid coins
 CRYPTO_PAIRS = [
     "BTC-USDT","ETH-USDT","BNB-USDT","SOL-USDT","XRP-USDT",
     "ADA-USDT","DOGE-USDT","DOT-USDT","MATIC-USDT","LINK-USDT",
     "UNI-USDT","AVAX-USDT","LTC-USDT","FIL-USDT","TRX-USDT",
-    "ATOM-USDT","XLM-USDT","ETC-USDT","BCH-USDT","NEAR-USDT"
+    "ATOM-USDT","XLM-USDT","ETC-USDT","BCH-USDT","NEAR-USDT",
+    "VET-USDT","ICP-USDT","HBAR-USDT","APT-USDT","ARB-USDT",
+    "OP-USDT","GRT-USDT","THETA-USDT","ALGO-USDT","FTM-USDT",
+    "EGLD-USDT","IMX-USDT","SAND-USDT","AXS-USDT","MANA-USDT",
+    "AAVE-USDT","MKR-USDT","SNX-USDT","CRV-USDT","COMP-USDT",
+    "ZEC-USDT","BAT-USDT","ENJ-USDT","CHZ-USDT","HOT-USDT",
+    "KSM-USDT","DASH-USDT","CELO-USDT","QTUM-USDT","IOST-USDT"
 ]
 
 # ============================================================
@@ -43,66 +48,87 @@ def atr(df, period=14):
     return tr.rolling(period).mean().iloc[-1]
 
 # ============================================================
-# BREAKOUT DETECTION (FIXED)
+# DUAL ENTRY LOGIC
 # ============================================================
-def detect_breakout(df_4h, btc_df_4h=None):
+def detect_entry(df_4h, btc_df_4h=None):
     """
     Returns (direction, entry_price, stop_loss, tp) or (None,None,None,None)
+    Checks breakout first, then pullback.
     """
-    if df_4h.empty or len(df_4h) < 30:
+    if df_4h.empty or len(df_4h) < 50:
         return None, None, None, None
 
-    # Current bar
     price = df_4h['Close'].iloc[-1]
     volume = df_4h['Volume'].iloc[-1]
+    ema50 = ema(df_4h['Close'], 50).iloc[-1]
 
-    # Lookback = previous 20 bars (excluding current)
-    recent = df_4h.iloc[-21:-1]   # bars -21 to -2 (20 bars)
-    if len(recent) < 20:
-        return None, None, None, None
-
-    range_high = recent['High'].max()
-    range_low = recent['Low'].min()
-    vol_avg = recent['Volume'].mean()
-
-    # Minimum volume condition (relaxed)
-    if vol_avg == 0 or volume < vol_avg * 1.2:
-        return None, None, None, None
-
-    # Breakout direction
-    if price > range_high:
-        direction = "LONG"
-        # Stop = range_low (the floor of the consolidation)
-        stop = range_low
-        entry = price
-    elif price < range_low:
-        direction = "SHORT"
-        stop = range_high
-        entry = price
-    else:
-        return None, None, None, None
-
-    # BTC filter
+    # BTC filter (hard)
     if btc_df_4h is not None and len(btc_df_4h) >= 50:
         btc_ema50 = ema(btc_df_4h['Close'], 50)
         btc_trend_up = btc_df_4h['Close'].iloc[-1] > btc_ema50.iloc[-1]
-        if direction == "LONG" and not btc_trend_up:
-            return None, None, None, None
-        if direction == "SHORT" and btc_trend_up:
-            return None, None, None, None
     else:
         return None, None, None, None
 
-    # Calculate risk and target
-    risk = abs(entry - stop)
-    if risk <= 0:
-        return None, None, None, None
-    if direction == "LONG":
-        tp = entry + 2 * risk
-    else:
-        tp = entry - 2 * risk
+    # -------- 1) Breakout (shorter lookback) --------
+    recent = df_4h.iloc[-11:-1]   # previous 10 bars
+    if len(recent) >= 10:
+        range_high = recent['High'].max()
+        range_low = recent['Low'].min()
+        vol_avg = recent['Volume'].mean()
+        if vol_avg > 0 and volume > vol_avg:   # volume > average
+            if price > range_high and btc_trend_up:
+                direction = "LONG"
+                stop = range_low
+                entry = price
+            elif price < range_low and not btc_trend_up:
+                direction = "SHORT"
+                stop = range_high
+                entry = price
+            else:
+                direction = None
 
-    return direction, entry, stop, tp
+            if direction:
+                risk = abs(entry - stop)
+                if risk > 0:
+                    tp = entry + 2*risk if direction == "LONG" else entry - 2*risk
+                    return direction, entry, stop, tp
+
+    # -------- 2) Pullback to EMA50 --------
+    if price > ema50 and btc_trend_up:
+        # Long pullback
+        atr_val = atr(df_4h)
+        if atr_val and not pd.isna(atr_val):
+            # Check if price recently dipped near EMA50 and now closing back above it
+            low = df_4h['Low'].iloc[-1]
+            open = df_4h['Open'].iloc[-1]
+            close = df_4h['Close'].iloc[-1]
+            # Candle closed green and touched near EMA
+            if close > open and low <= ema50 + 0.5*atr_val and low >= ema50 - 1.5*atr_val:
+                direction = "LONG"
+                entry = close
+                stop = min(low, ema50 - 1.0*atr_val)   # below recent low
+                risk = abs(entry - stop)
+                if risk > 0:
+                    tp = entry + 2*risk
+                    return direction, entry, stop, tp
+
+    elif price < ema50 and not btc_trend_up:
+        # Short pullback
+        atr_val = atr(df_4h)
+        if atr_val and not pd.isna(atr_val):
+            high = df_4h['High'].iloc[-1]
+            open = df_4h['Open'].iloc[-1]
+            close = df_4h['Close'].iloc[-1]
+            if close < open and high >= ema50 - 0.5*atr_val and high <= ema50 + 1.5*atr_val:
+                direction = "SHORT"
+                entry = close
+                stop = max(high, ema50 + 1.0*atr_val)
+                risk = abs(entry - stop)
+                if risk > 0:
+                    tp = entry - 2*risk
+                    return direction, entry, stop, tp
+
+    return None, None, None, None
 
 # ============================================================
 # DATA FETCHING
@@ -174,8 +200,8 @@ def run_backtest():
     trade_log = []
     equity_curve = []
 
-    print(f"Running BREAKOUT STRATEGY (1:2 RR) from {start_date.date()} to {end_date.date()}...")
-    print(f"Timeline length: {len(timeline)} 4H candles")
+    print(f"Running DUAL ENTRY 1:2 RR BACKTEST from {start_date.date()} to {end_date.date()}...")
+    print(f"Timeline: {len(timeline)} 4H candles")
 
     for current_time in timeline:
         # ---- 1. Check existing trades ----
@@ -229,25 +255,24 @@ def run_backtest():
         for idx in sorted(closed_indices, reverse=True):
             open_trades.pop(idx)
 
-        # ---- 2. Generate new signals ----
+        # ---- 2. Generate new signals (multiple allowed) ----
         risky_count = len(open_trades)
         if risky_count < MAX_RISKY_TRADES:
             open_symbols = {t['symbol'] for t in open_trades}
+            candidates = []
             for sym_yahoo, sym_data in data.items():
                 if sym_yahoo in open_symbols:
                     continue
                 df_4h = sym_data['4h'].loc[:current_time]
                 btc_ctx = btc_4h.loc[:current_time]
-                direction, entry, stop, tp = detect_breakout(df_4h, btc_ctx)
+                direction, entry, stop, tp = detect_entry(df_4h, btc_ctx)
                 if direction is None:
                     continue
-
                 risk = abs(entry - stop)
                 if risk <= 0:
                     continue
                 quantity = round((balance * RISK_PER_TRADE) / risk, 8)
-
-                open_trades.append({
+                candidates.append({
                     'symbol': sym_yahoo,
                     'direction': direction,
                     'entry': entry,
@@ -256,8 +281,12 @@ def run_backtest():
                     'quantity': quantity,
                     'original_qty': quantity
                 })
-                # Only one new trade per bar
-                break
+            # Take all eligible trades up to the limit
+            for trade in candidates:
+                if risky_count >= MAX_RISKY_TRADES:
+                    break
+                open_trades.append(trade)
+                risky_count += 1
 
         # Record equity
         equity_curve.append((current_time, balance))
@@ -350,7 +379,7 @@ def run_backtest():
 
     summary = (
         f"\n{'='*50}\n"
-        f"BACKTEST RESULTS (BREAKOUT STRATEGY, 1:2 RR)\n"
+        f"BACKTEST RESULTS (DUAL ENTRY, 1:2 RR)\n"
         f"{'='*50}\n"
         f"Period: {BACKTEST_START} → {datetime.now().strftime('%Y-%m-%d')}\n"
         f"Initial Balance: ${INITIAL_BALANCE:.2f}\n"
