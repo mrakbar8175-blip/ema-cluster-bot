@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-KuCoin Historical Backtester – Relaxed EMA Pullback, 1:2 RR, Micro‑Stop
+KuCoin Historical Backtester – Enhanced EMA Pullback, 1:2 RR, Micro‑Stop
+Filters: ADX>20, RSI zone, volume confirmation, stronger break.
 Tight stop (0.5‑0.7 ATR), target = 1‑1.4 ATR (2R).
-Relaxed entry: any pullback near 50‑EMA that shows trend resumption.
-Strong trend + BTC filter. Top‑50 coins.
 Usage: python backtest_ku.py FETCH    (download data)
        python backtest_ku.py BACKTEST (run simulation)
 """
@@ -38,7 +37,7 @@ CRYPTO_PAIRS = [
 ]
 
 # ============================================================
-# TECHNICAL INDICATORS
+# TECHNICAL INDICATORS (enhanced)
 # ============================================================
 def ema(series, period):
     return series.ewm(span=period, adjust=False).mean()
@@ -48,13 +47,42 @@ def atr(df, period=14):
     tr = pd.concat([h - l, (h - c.shift()).abs(), (l - c.shift()).abs()], axis=1).max(axis=1)
     return tr.rolling(period).mean().iloc[-1]
 
+def rsi(series, period=14):
+    delta = series.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/period, adjust=False).mean()
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
+
+def adx(df, period=14):
+    high, low, close = df['High'], df['Low'], df['Close']
+    plus_dm = high.diff()
+    minus_dm = -low.diff()  # make positive when price moves down
+
+    # DM must be positive only when one direction exceeds the other
+    plus_dm = plus_dm.clip(lower=0)
+    minus_dm = minus_dm.clip(lower=0)
+
+    # True Range
+    tr = pd.concat([high - low, (high - close.shift()).abs(), (low - close.shift()).abs()], axis=1).max(axis=1)
+    atr_smooth = tr.ewm(alpha=1/period, adjust=False).mean()
+
+    plus_di = 100 * (plus_dm.ewm(alpha=1/period, adjust=False).mean() / atr_smooth)
+    minus_di = 100 * (minus_dm.ewm(alpha=1/period, adjust=False).mean() / atr_smooth)
+
+    dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di))
+    adx_val = dx.ewm(alpha=1/period, adjust=False).mean()
+    return adx_val, plus_di, minus_di
+
 # ============================================================
-# RELAXED PULLBACK ENTRY (high frequency)
+# ENHANCED PULLBACK ENTRY (higher winrate filters)
 # ============================================================
 def detect_entry(df_4h, btc_df_4h=None):
     """
     Returns (direction, entry_price, stop_loss, tp) or (None,None,None,None)
-    Relaxed entry: any candle closing in trend direction while price near 50-EMA.
+    Now with ADX, RSI, volume & stronger trend-resumption confirmation.
     """
     if df_4h.empty or len(df_4h) < 70:
         return None, None, None, None
@@ -66,6 +94,21 @@ def detect_entry(df_4h, btc_df_4h=None):
 
     if atr_val is None or pd.isna(atr_val) or atr_val <= 0:
         return None, None, None, None
+
+    # ADX & DI
+    adx_series, plus_di, minus_di = adx(df_4h, 14)
+    adx_val = adx_series.iloc[-1]
+    plus = plus_di.iloc[-1]
+    minus = minus_di.iloc[-1]
+
+    # RSI
+    rsi_series = rsi(df_4h['Close'], 14)
+    rsi_val = rsi_series.iloc[-1]
+
+    # Volume
+    vol = df_4h['Volume']
+    vol_current = vol.iloc[-1]
+    vol_previous = vol.iloc[-2] if len(vol) >= 2 else 0
 
     # Trend check
     uptrend = price > ema50.iloc[-1] and ema50.iloc[-1] > ema200.iloc[-1]
@@ -80,34 +123,29 @@ def detect_entry(df_4h, btc_df_4h=None):
     else:
         return None, None, None, None
 
-    # Relaxed: check last 3 candles for a touch of EMA50 and a bullish/bearish close
-    last = df_4h.iloc[-1]
-    prev2 = df_4h.iloc[-2]
-    prev3 = df_4h.iloc[-3]
+    # Pullback condition: price touched 50-EMA recently (within 1.5 ATR)
+    ema50_val = ema50.iloc[-1]
+    low_curr, low_prev = df_4h['Low'].iloc[-1], df_4h['Low'].iloc[-2]
+    high_curr, high_prev = df_4h['High'].iloc[-1], df_4h['High'].iloc[-2]
+    open_curr, close_curr = df_4h['Open'].iloc[-1], price
+    close_prev = df_4h['Close'].iloc[-2]
 
     # ----- LONG SETUP -----
     if uptrend and btc_trend_up:
-        # Check if any of the last 3 candles touched near EMA50 (within 1.5 ATR)
-        touched_ema = False
-        for candle in [last, prev2, prev3]:
-            if abs(candle['Low'] - ema50.iloc[-1]) < 1.5 * atr_val:
-                touched_ema = True
-                break
-        # Also check if current candle is green (closing above open)
-        is_green = last['Close'] > last['Open']
-        # Also check if price is not too far above EMA (max 2 ATR)
-        near_ema = abs(price - ema50.iloc[-1]) < 2.0 * atr_val
+        pullback = (abs(low_curr - ema50_val) < 1.5 * atr_val) or (abs(low_prev - ema50_val) < 1.5 * atr_val)
+        # Strong resumption: close > previous high, green candle, volume expansion
+        resumption = (close_curr > high_prev) and (close_curr > open_curr) and (vol_current > vol_previous)
+        rsi_ok = 40 < rsi_val < 65          # not overbought, not too weak
+        adx_ok = adx_val > 20 and plus > minus
 
-        if touched_ema and is_green and near_ema:
+        if pullback and resumption and rsi_ok and adx_ok:
             entry = price
-            # Stop = recent swing low (tight)
             recent_low = df_4h['Low'].iloc[-5:].min()
-            stop = min(recent_low, ema50.iloc[-1] - 0.5 * atr_val)
-            # Ensure stop is tight (max 0.7 ATR away)
+            stop = min(recent_low, ema50_val - 0.5 * atr_val)
+            # Enforce micro-stop boundaries (0.5 – 0.7 ATR)
             if entry - stop > 0.7 * atr_val:
                 stop = entry - 0.6 * atr_val
             if entry - stop < 0.2 * atr_val:
-                # Too tight, use 0.3 ATR minimum
                 stop = entry - 0.3 * atr_val
             risk = entry - stop
             if risk <= 0:
@@ -117,18 +155,15 @@ def detect_entry(df_4h, btc_df_4h=None):
 
     # ----- SHORT SETUP -----
     if downtrend and not btc_trend_up:
-        touched_ema = False
-        for candle in [last, prev2, prev3]:
-            if abs(candle['High'] - ema50.iloc[-1]) < 1.5 * atr_val:
-                touched_ema = True
-                break
-        is_red = last['Close'] < last['Open']
-        near_ema = abs(price - ema50.iloc[-1]) < 2.0 * atr_val
+        pullback = (abs(high_curr - ema50_val) < 1.5 * atr_val) or (abs(high_prev - ema50_val) < 1.5 * atr_val)
+        resumption = (close_curr < low_prev) and (close_curr < open_curr) and (vol_current > vol_previous)
+        rsi_ok = 35 < rsi_val < 60
+        adx_ok = adx_val > 20 and minus > plus
 
-        if touched_ema and is_red and near_ema:
+        if pullback and resumption and rsi_ok and adx_ok:
             entry = price
             recent_high = df_4h['High'].iloc[-5:].max()
-            stop = max(recent_high, ema50.iloc[-1] + 0.5 * atr_val)
+            stop = max(recent_high, ema50_val + 0.5 * atr_val)
             if stop - entry > 0.7 * atr_val:
                 stop = entry + 0.6 * atr_val
             if stop - entry < 0.2 * atr_val:
@@ -142,7 +177,7 @@ def detect_entry(df_4h, btc_df_4h=None):
     return None, None, None, None
 
 # ============================================================
-# DATA FETCHING
+# DATA FETCHING (unchanged)
 # ============================================================
 def fetch_and_save(symbol_ccxt, timeframe, days_back=DAYS_HISTORY):
     exchange = ccxt.kucoin({'enableRateLimit': True})
@@ -183,7 +218,7 @@ def fetch_all_data():
             print(f"4H data exists for {pair}, skipping fetch.")
 
 # ============================================================
-# BACKTEST ENGINE
+# BACKTEST ENGINE (unchanged)
 # ============================================================
 def run_backtest():
     print("Loading data into memory...")
@@ -211,7 +246,7 @@ def run_backtest():
     trade_log = []
     equity_curve = []
 
-    print(f"Running RELAXED PULLBACK (1:2 RR, micro‑stop) from {start_date.date()} to {end_date.date()}...")
+    print(f"Running ENHANCED PULLBACK (1:2 RR, micro‑stop) from {start_date.date()} to {end_date.date()}...")
     print(f"Timeline: {len(timeline)} 4H candles")
 
     for current_time in timeline:
@@ -386,7 +421,7 @@ def run_backtest():
 
     summary = (
         f"\n{'='*50}\n"
-        f"BACKTEST RESULTS (RELAXED PULLBACK, 1:2 RR, MICRO‑STOP)\n"
+        f"BACKTEST RESULTS (ENHANCED PULLBACK, 1:2 RR, MICRO‑STOP)\n"
         f"{'='*50}\n"
         f"Period: {BACKTEST_START} → {datetime.now().strftime('%Y-%m-%d')}\n"
         f"Initial Balance: ${INITIAL_BALANCE:.2f}\n"
