@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-KuCoin Historical Backtester – Relaxed EMA Pullback, 1:2 RR, Micro‑Stop
-Tight stop (0.5× ATR), target = 1× ATR (2R).
-Relaxed entry: any pullback near 50‑EMA that shows trend resumption.
-Strong trend + BTC filter. Top‑50 coins.
+KuCoin Historical Backtester – ADX+RSI+Bollinger Pullback, 1:2 RR, Micro‑Stop
+Tight stop (0.5‑0.7 ATR), target = 1‑1.4 ATR (2R).
+Strong trend (ADX>25), RSI filter, Bollinger Band confirmation, BTC aligned.
 Usage: python backtest_ku.py FETCH    (download data)
        python backtest_ku.py BACKTEST (run simulation)
 """
@@ -43,101 +42,147 @@ CRYPTO_PAIRS = [
 def ema(series, period):
     return series.ewm(span=period, adjust=False).mean()
 
+def sma(series, period):
+    return series.rolling(period).mean()
+
 def atr(df, period=14):
     h, l, c = df['High'], df['Low'], df['Close']
     tr = pd.concat([h - l, (h - c.shift()).abs(), (l - c.shift()).abs()], axis=1).max(axis=1)
     return tr.rolling(period).mean().iloc[-1]
 
+def rsi(df, period=14):
+    delta = df['Close'].diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    avg_gain = gain.ewm(alpha=1/period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/period, adjust=False).mean()
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs)).iloc[-1] if not rs.isna().iloc[-1] else None
+
+def adx(df, period=14):
+    h, l, c = df['High'], df['Low'], df['Close']
+    dm_plus = h.diff()
+    dm_minus = -l.diff()
+    dm_plus[dm_plus < 0] = 0
+    dm_minus[dm_minus < 0] = 0
+    tr = pd.concat([h - l, (h - c.shift()).abs(), (l - c.shift()).abs()], axis=1).max(axis=1)
+    atr_val = tr.ewm(alpha=1/period, adjust=False).mean()
+    di_plus = 100 * (dm_plus.ewm(alpha=1/period, adjust=False).mean() / atr_val)
+    di_minus = 100 * (dm_minus.ewm(alpha=1/period, adjust=False).mean() / atr_val)
+    dx = 100 * (di_plus - di_minus).abs() / (di_plus + di_minus)
+    return dx.ewm(alpha=1/period, adjust=False).mean().iloc[-1]
+
+def bollinger_bands(df, period=20, std=2):
+    sma20 = sma(df['Close'], period)
+    rolling_std = df['Close'].rolling(period).std()
+    upper = sma20 + std * rolling_std
+    lower = sma20 - std * rolling_std
+    return upper.iloc[-1], sma20.iloc[-1], lower.iloc[-1]
+
 # ============================================================
-# RELAXED PULLBACK ENTRY (high frequency)
+# REFINED PULLBACK ENTRY (ADX+RSI+Bollinger)
 # ============================================================
 def detect_entry(df_4h, btc_df_4h=None):
-    """
-    Returns (direction, entry_price, stop_loss, tp) or (None,None,None,None)
-    Relaxed entry: any candle closing in trend direction while price near 50-EMA.
-    """
-    if df_4h.empty or len(df_4h) < 70:
+    if df_4h.empty or len(df_4h) < 80:
         return None, None, None, None
 
     price = df_4h['Close'].iloc[-1]
-    ema50 = ema(df_4h['Close'], 50)
-    ema200 = ema(df_4h['Close'], 200)
+    ema50 = ema(df_4h['Close'], 50).iloc[-1]
+    ema200 = ema(df_4h['Close'], 200).iloc[-1]
     atr_val = atr(df_4h)
+    rsi_val = rsi(df_4h)
+    adx_val = adx(df_4h)
 
     if atr_val is None or pd.isna(atr_val) or atr_val <= 0:
         return None, None, None, None
 
+    # Minimum ATR (0.8% of price)
+    if atr_val < price * 0.008:
+        return None, None, None, None
+
     # Trend check
-    uptrend = price > ema50.iloc[-1] and ema50.iloc[-1] > ema200.iloc[-1]
-    downtrend = price < ema50.iloc[-1] and ema50.iloc[-1] < ema200.iloc[-1]
+    uptrend = price > ema50 and ema50 > ema200
+    downtrend = price < ema50 and ema50 < ema200
     if not uptrend and not downtrend:
+        return None, None, None, None
+
+    # ADX must be strong (>25)
+    if adx_val is None or pd.isna(adx_val) or adx_val < 25:
         return None, None, None, None
 
     # BTC filter
     if btc_df_4h is not None and len(btc_df_4h) >= 50:
-        btc_ema50 = ema(btc_df_4h['Close'], 50)
-        btc_trend_up = btc_df_4h['Close'].iloc[-1] > btc_ema50.iloc[-1]
+        btc_ema50 = ema(btc_df_4h['Close'], 50).iloc[-1]
+        btc_trend_up = btc_df_4h['Close'].iloc[-1] > btc_ema50
     else:
         return None, None, None, None
 
-    # Relaxed: check last 3 candles for a touch of EMA50 and a bullish/bearish close
+    # RSI filter
+    if rsi_val is None or pd.isna(rsi_val):
+        return None, None, None, None
+
+    # Bollinger Bands
+    bb_upper, bb_mid, bb_lower = bollinger_bands(df_4h)
+
+    # Volume check (last bar volume > 1.2 x average of last 20 bars excluding current)
+    if len(df_4h) >= 21:
+        vol_avg = df_4h['Volume'].iloc[-21:-1].mean()
+        if df_4h['Volume'].iloc[-1] < vol_avg * 1.2:
+            return None, None, None, None
+    else:
+        return None, None, None, None
+
     last = df_4h.iloc[-1]
-    prev2 = df_4h.iloc[-2]
-    prev3 = df_4h.iloc[-3]
 
     # ----- LONG SETUP -----
     if uptrend and btc_trend_up:
-        # Check if any of the last 3 candles touched near EMA50 (within 1.5 ATR)
-        touched_ema = False
-        for candle in [last, prev2, prev3]:
-            if abs(candle['Low'] - ema50.iloc[-1]) < 1.5 * atr_val:
-                touched_ema = True
-                break
-        # Also check if current candle is green (closing above open)
-        is_green = last['Close'] > last['Open']
-        # Also check if price is not too far above EMA (max 2 ATR)
-        near_ema = abs(price - ema50.iloc[-1]) < 2.0 * atr_val
+        # RSI condition: not overbought
+        if rsi_val >= 65:
+            return None, None, None, None
+        # Price must be near or below the middle Bollinger Band (pullback to value)
+        if price > bb_mid * 1.01:   # only allow entry if price is at or below the middle band
+            return None, None, None, None
+        # Pullback to EMA50 (within 1.5 ATR)
+        if abs(price - ema50) > 1.5 * atr_val:
+            return None, None, None, None
+        # Bullish candle: close > open
+        if last['Close'] <= last['Open']:
+            return None, None, None, None
 
-        if touched_ema and is_green and near_ema:
-            entry = price
-            # Stop = recent swing low (tight)
-            recent_low = df_4h['Low'].iloc[-5:].min()
-            stop = min(recent_low, ema50.iloc[-1] - 0.5 * atr_val)
-            # Ensure stop is tight (max 0.7 ATR away)
-            if entry - stop > 0.7 * atr_val:
-                stop = entry - 0.6 * atr_val
-            if entry - stop < 0.2 * atr_val:
-                # Too tight, use 0.3 ATR minimum
-                stop = entry - 0.3 * atr_val
-            risk = entry - stop
-            if risk <= 0:
-                return None, None, None, None
-            tp = entry + 2 * risk
-            return "LONG", entry, stop, tp
+        entry = price
+        stop = max(ema50 - 0.5 * atr_val, df_4h['Low'].iloc[-5:].min() - 0.1 * atr_val)
+        if entry - stop > 0.8 * atr_val:
+            stop = entry - 0.7 * atr_val
+        if entry - stop < 0.2 * atr_val:
+            stop = entry - 0.3 * atr_val
+        risk = entry - stop
+        if risk <= 0:
+            return None, None, None, None
+        tp = entry + 2 * risk
+        return "LONG", entry, stop, tp
 
     # ----- SHORT SETUP -----
     if downtrend and not btc_trend_up:
-        touched_ema = False
-        for candle in [last, prev2, prev3]:
-            if abs(candle['High'] - ema50.iloc[-1]) < 1.5 * atr_val:
-                touched_ema = True
-                break
-        is_red = last['Close'] < last['Open']
-        near_ema = abs(price - ema50.iloc[-1]) < 2.0 * atr_val
+        if rsi_val <= 35:
+            return None, None, None, None
+        if price < bb_mid * 0.99:
+            return None, None, None, None
+        if abs(price - ema50) > 1.5 * atr_val:
+            return None, None, None, None
+        if last['Close'] >= last['Open']:
+            return None, None, None, None
 
-        if touched_ema and is_red and near_ema:
-            entry = price
-            recent_high = df_4h['High'].iloc[-5:].max()
-            stop = max(recent_high, ema50.iloc[-1] + 0.5 * atr_val)
-            if stop - entry > 0.7 * atr_val:
-                stop = entry + 0.6 * atr_val
-            if stop - entry < 0.2 * atr_val:
-                stop = entry + 0.3 * atr_val
-            risk = stop - entry
-            if risk <= 0:
-                return None, None, None, None
-            tp = entry - 2 * risk
-            return "SHORT", entry, stop, tp
+        entry = price
+        stop = min(ema50 + 0.5 * atr_val, df_4h['High'].iloc[-5:].max() + 0.1 * atr_val)
+        if stop - entry > 0.8 * atr_val:
+            stop = entry + 0.7 * atr_val
+        if stop - entry < 0.2 * atr_val:
+            stop = entry + 0.3 * atr_val
+        risk = stop - entry
+        if risk <= 0:
+            return None, None, None, None
+        tp = entry - 2 * risk
+        return "SHORT", entry, stop, tp
 
     return None, None, None, None
 
@@ -211,7 +256,7 @@ def run_backtest():
     trade_log = []
     equity_curve = []
 
-    print(f"Running RELAXED PULLBACK (1:2 RR, micro‑stop) from {start_date.date()} to {end_date.date()}...")
+    print(f"Running REFINED PULLBACK (ADX+RSI+BB) 1:2 RR from {start_date.date()} to {end_date.date()}...")
     print(f"Timeline: {len(timeline)} 4H candles")
 
     for current_time in timeline:
@@ -386,7 +431,7 @@ def run_backtest():
 
     summary = (
         f"\n{'='*50}\n"
-        f"BACKTEST RESULTS (RELAXED PULLBACK, 1:2 RR, MICRO‑STOP)\n"
+        f"BACKTEST RESULTS (REFINED PULLBACK, 1:2 RR)\n"
         f"{'='*50}\n"
         f"Period: {BACKTEST_START} → {datetime.now().strftime('%Y-%m-%d')}\n"
         f"Initial Balance: ${INITIAL_BALANCE:.2f}\n"
