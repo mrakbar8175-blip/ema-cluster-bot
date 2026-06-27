@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-KuCoin Historical Backtester – MACD Zero‑Line Crossover + 200 EMA, 1:2 RR
-Tight stop: min(5-bar swing low, 1.5 ATR) for longs, max(5-bar swing high, 1.5 ATR) for shorts
+KuCoin Historical Backtester – EMA+Bollinger Pullback, 1:2 RR
+Long: price>200EMA, touches lower BB, green candle, volume>1.5x avg, stop=signal low, target=2R
+Short: price<200EMA, touches upper BB, red candle, volume surge, stop=signal high, target=2R
 Usage: python backtest_ku.py FETCH    (download data)
        python backtest_ku.py BACKTEST (run simulation)
 """
@@ -20,7 +21,6 @@ BACKTEST_START = "2025-01-01"
 INITIAL_BALANCE = 1000.0
 RISK_PER_TRADE = 0.01
 MAX_RISKY_TRADES = 5
-BTC_FILTER = True          # set to False to disable BTC trend filter
 DATA_FOLDER = "kucoin_data"
 
 CRYPTO_PAIRS = [
@@ -42,79 +42,62 @@ CRYPTO_PAIRS = [
 def ema(series, period):
     return series.ewm(span=period, adjust=False).mean()
 
-def atr(df, period=14):
-    h, l, c = df['High'], df['Low'], df['Close']
-    tr = pd.concat([h - l, (h - c.shift()).abs(), (l - c.shift()).abs()], axis=1).max(axis=1)
-    return tr.rolling(period).mean().iloc[-1]
-
-def macd(series, fast=12, slow=26, signal=9):
-    exp1 = series.ewm(span=fast, adjust=False).mean()
-    exp2 = series.ewm(span=slow, adjust=False).mean()
-    macd_line = exp1 - exp2
-    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
-    return macd_line, signal_line
+def bollinger_bands(series, period=20, std=2):
+    sma = series.rolling(period).mean()
+    rolling_std = series.rolling(period).std()
+    upper = sma + std * rolling_std
+    lower = sma - std * rolling_std
+    return upper, lower
 
 # ============================================================
-# MACD ZERO‑LINE CROSSOVER + 200 EMA ENTRY
+# ENTRY LOGIC
 # ============================================================
-def detect_entry(df_4h, btc_df_4h=None):
+def detect_entry(df_4h):
     """
-    Returns (direction, entry_price, stop_loss, tp) or (None,None,None,None)
+    Returns (direction, entry_price, stop_loss, tp) or None
     """
-    if df_4h.empty or len(df_4h) < 80:
-        return None, None, None, None
+    if df_4h.empty or len(df_4h) < 50:
+        return None
 
     price = df_4h['Close'].iloc[-1]
     ema200 = ema(df_4h['Close'], 200).iloc[-1]
-    atr_val = atr(df_4h)
+    bb_upper, bb_lower = bollinger_bands(df_4h['Close'])
+    bb_upper = bb_upper.iloc[-1]
+    bb_lower = bb_lower.iloc[-1]
 
-    if atr_val is None or pd.isna(atr_val) or atr_val <= 0:
-        return None, None, None, None
-
-    # MACD calculation
-    macd_line, macd_signal = macd(df_4h['Close'])
-    macd_curr = macd_line.iloc[-1]
-    macd_prev = macd_line.iloc[-2]
-    sig_curr = macd_signal.iloc[-1]
-    sig_prev = macd_signal.iloc[-2]
-
-    # BTC filter (optional)
-    if BTC_FILTER and btc_df_4h is not None and len(btc_df_4h) >= 50:
-        btc_ema50 = ema(btc_df_4h['Close'], 50).iloc[-1]
-        btc_trend_up = btc_df_4h['Close'].iloc[-1] > btc_ema50
+    vol_curr = df_4h['Volume'].iloc[-1]
+    if len(df_4h) >= 21:
+        vol_avg = df_4h['Volume'].iloc[-21:-1].mean()
     else:
-        btc_trend_up = True
-        btc_trend_down = True
+        vol_avg = vol_curr
 
-    # ----- LONG SIGNAL -----
-    if price > ema200 and macd_curr < 0 and sig_curr < 0:
-        if macd_prev < sig_prev and macd_curr > sig_curr:   # crossover up
-            if BTC_FILTER and not btc_trend_up:
-                return None, None, None, None
-            # Stop = min(5-bar swing low, entry - 1.5*ATR)
-            swing_low = df_4h['Low'].iloc[-6:-1].min()   # last 5 bars excluding current
-            stop_atr = price - 1.5 * atr_val
-            stop = max(swing_low, stop_atr)   # choose the higher (tighter) stop
-            if price - stop <= 0:
-                return None, None, None, None
-            tp = price + 2 * (price - stop)
-            return "LONG", price, stop, tp
+    # Candle info
+    open_curr = df_4h['Open'].iloc[-1]
+    close_curr = df_4h['Close'].iloc[-1]
+    low_curr = df_4h['Low'].iloc[-1]
+    high_curr = df_4h['High'].iloc[-1]
 
-    # ----- SHORT SIGNAL -----
-    if price < ema200 and macd_curr > 0 and sig_curr > 0:
-        if macd_prev > sig_prev and macd_curr < sig_curr:   # crossover down
-            if BTC_FILTER and btc_trend_up:
-                return None, None, None, None
-            # Stop = max(5-bar swing high, entry + 1.5*ATR)
-            swing_high = df_4h['High'].iloc[-6:-1].max()
-            stop_atr = price + 1.5 * atr_val
-            stop = min(swing_high, stop_atr)   # choose the lower (tighter) stop
-            if stop - price <= 0:
-                return None, None, None, None
-            tp = price - 2 * (stop - price)
-            return "SHORT", price, stop, tp
+    # ----- LONG -----
+    if price > ema200 and low_curr <= bb_lower:
+        if close_curr > open_curr and vol_curr > vol_avg * 1.5:
+            entry = close_curr
+            stop = low_curr
+            if entry - stop <= 0:
+                return None
+            tp = entry + 2 * (entry - stop)
+            return "LONG", entry, stop, tp
 
-    return None, None, None, None
+    # ----- SHORT -----
+    if price < ema200 and high_curr >= bb_upper:
+        if close_curr < open_curr and vol_curr > vol_avg * 1.5:
+            entry = close_curr
+            stop = high_curr
+            if stop - entry <= 0:
+                return None
+            tp = entry - 2 * (stop - entry)
+            return "SHORT", entry, stop, tp
+
+    return None
 
 # ============================================================
 # DATA FETCHING (unchanged)
@@ -172,11 +155,11 @@ def run_backtest():
         yahoo_symbol = pair.replace("-USDT", "-USD")
         data[yahoo_symbol] = {'4h': df_4h}
 
-    if "BTC-USD" not in data:
-        print("BTC data missing, cannot continue.")
-        return
+    if "BTC-USD" in data:
+        btc_4h = data["BTC-USD"]['4h']
+    else:
+        btc_4h = next(iter(data.values()))['4h']
 
-    btc_4h = data["BTC-USD"]['4h']
     start_date = pd.Timestamp(BACKTEST_START)
     end_date = pd.Timestamp.now()
     timeline = btc_4h.index[(btc_4h.index >= start_date) & (btc_4h.index <= end_date)]
@@ -186,54 +169,47 @@ def run_backtest():
     trade_log = []
     equity_curve = []
 
-    print(f"Running MACD Zero‑Line Crossover + 200 EMA (Tight Stop) from {start_date.date()} to {end_date.date()}...")
+    print(f"Running EMA+BOLLINGER PULLBACK (1:2 RR) from {start_date.date()} to {end_date.date()}...")
     print(f"Timeline: {len(timeline)} 4H candles")
 
     for current_time in timeline:
-        # ---- 1. Check existing trades ----
+        # Check existing trades
         closed_indices = []
         for idx, trade in enumerate(open_trades):
             sym = trade['symbol']
             if sym not in data:
                 continue
-            df_sym_4h = data[sym]['4h']
-            if current_time not in df_sym_4h.index:
+            df_sym = data[sym]['4h']
+            if current_time not in df_sym.index:
                 continue
-            candle = df_sym_4h.loc[current_time]
-            high, low = candle['High'], candle['Low']
+            bar = df_sym.loc[current_time]
+            high, low = bar['High'], bar['Low']
             entry, stop, tp = trade['entry'], trade['stop'], trade['tp']
             direction = trade['direction']
-            remaining_qty = trade['quantity']
+            qty = trade['quantity']
 
-            hit_tp = False
-            hit_sl = False
-            exit_price = None
-
+            hit = False
             if direction == "LONG":
                 if high >= tp:
-                    hit_tp = True
                     exit_price = tp
+                    hit = True
                 elif low <= stop:
-                    hit_sl = True
                     exit_price = stop
+                    hit = True
             else:
                 if low <= tp:
-                    hit_tp = True
                     exit_price = tp
+                    hit = True
                 elif high >= stop:
-                    hit_sl = True
                     exit_price = stop
+                    hit = True
 
-            if hit_tp or hit_sl:
-                pnl = (exit_price - entry) * remaining_qty if direction == "LONG" else (entry - exit_price) * remaining_qty
+            if hit:
+                pnl = (exit_price - entry) * qty if direction == "LONG" else (entry - exit_price) * qty
                 trade_log.append({
-                    'timestamp': current_time,
-                    'symbol': sym,
-                    'action': direction,
-                    'hit_level': "TP" if hit_tp else "STOP LOSS",
-                    'exit_price': exit_price,
-                    'quantity': remaining_qty,
-                    'pnl': round(pnl, 4)
+                    'timestamp': current_time, 'symbol': sym, 'action': direction,
+                    'hit_level': "TP" if exit_price == tp else "STOP LOSS",
+                    'exit_price': exit_price, 'quantity': qty, 'pnl': round(pnl, 4)
                 })
                 balance += pnl
                 closed_indices.append(idx)
@@ -241,37 +217,30 @@ def run_backtest():
         for idx in sorted(closed_indices, reverse=True):
             open_trades.pop(idx)
 
-        # ---- 2. Generate new signals ----
-        risky_count = len(open_trades)
-        if risky_count < MAX_RISKY_TRADES:
+        # New signals
+        if len(open_trades) < MAX_RISKY_TRADES:
             open_symbols = {t['symbol'] for t in open_trades}
             candidates = []
-            for sym_yahoo, sym_data in data.items():
-                if sym_yahoo in open_symbols:
+            for sym, sym_data in data.items():
+                if sym in open_symbols:
                     continue
                 df_4h = sym_data['4h'].loc[:current_time]
-                btc_ctx = btc_4h.loc[:current_time] if BTC_FILTER else None
-                direction, entry, stop, tp = detect_entry(df_4h, btc_ctx)
-                if direction is None:
+                res = detect_entry(df_4h)
+                if res is None:
                     continue
+                direction, entry, stop, tp = res
                 risk = abs(entry - stop)
                 if risk <= 0:
                     continue
-                quantity = round((balance * RISK_PER_TRADE) / risk, 8)
+                qty = round((balance * RISK_PER_TRADE) / risk, 8)
                 candidates.append({
-                    'symbol': sym_yahoo,
-                    'direction': direction,
-                    'entry': entry,
-                    'stop': stop,
-                    'tp': tp,
-                    'quantity': quantity,
-                    'original_qty': quantity
+                    'symbol': sym, 'direction': direction, 'entry': entry,
+                    'stop': stop, 'tp': tp, 'quantity': qty, 'original_qty': qty
                 })
-            for trade in candidates:
-                if risky_count >= MAX_RISKY_TRADES:
+            for t in candidates:
+                if len(open_trades) >= MAX_RISKY_TRADES:
                     break
-                open_trades.append(trade)
-                risky_count += 1
+                open_trades.append(t)
 
         equity_curve.append((current_time, balance))
 
@@ -280,18 +249,11 @@ def run_backtest():
         sym = trade['symbol']
         if sym in data:
             last_price = data[sym]['4h']['Close'].iloc[-1]
-            entry = trade['entry']
-            remaining_qty = trade['quantity']
-            direction = trade['direction']
-            pnl = (last_price - entry) * remaining_qty if direction == "LONG" else (entry - last_price) * remaining_qty
+            entry, qty, direction = trade['entry'], trade['quantity'], trade['direction']
+            pnl = (last_price - entry) * qty if direction == "LONG" else (entry - last_price) * qty
             trade_log.append({
-                'timestamp': data[sym]['4h'].index[-1],
-                'symbol': sym,
-                'action': direction,
-                'hit_level': 'MARKET CLOSE',
-                'exit_price': last_price,
-                'quantity': remaining_qty,
-                'pnl': round(pnl, 4)
+                'timestamp': data[sym]['4h'].index[-1], 'symbol': sym, 'action': direction,
+                'hit_level': 'MARKET CLOSE', 'exit_price': last_price, 'quantity': qty, 'pnl': round(pnl, 4)
             })
             balance += pnl
 
@@ -300,69 +262,53 @@ def run_backtest():
         return
 
     trades_df = pd.DataFrame(trade_log)
-    trade_groups = trades_df.groupby(['timestamp', 'symbol'])
+    groups = trades_df.groupby(['timestamp', 'symbol'])
     full_trades = []
-    for (ts, sym), group in trade_groups:
-        total_pnl = group['pnl'].sum()
-        full_trades.append({
-            'entry_time': ts,
-            'symbol': sym,
-            'total_pnl': total_pnl,
-            'action': group['action'].iloc[0]
-        })
+    for (ts, sym), grp in groups:
+        total_pnl = grp['pnl'].sum()
+        full_trades.append({'entry_time': ts, 'symbol': sym, 'total_pnl': total_pnl, 'action': grp['action'].iloc[0]})
     full_df = pd.DataFrame(full_trades).sort_values('entry_time')
     full_df['is_win'] = full_df['total_pnl'] > 0
     full_df['is_loss'] = full_df['total_pnl'] < 0
-
-    # Streaks
-    curr_win_streak = 0
-    curr_loss_streak = 0
-    longest_win_streak = 0
-    longest_loss_streak = 0
-    win_buf = 0
-    loss_buf = 0
-    for _, row in full_df.iterrows():
-        if row['is_win']:
-            win_buf += 1
-            loss_buf = 0
-            longest_win_streak = max(longest_win_streak, win_buf)
-        elif row['is_loss']:
-            loss_buf += 1
-            win_buf = 0
-            longest_loss_streak = max(longest_loss_streak, loss_buf)
-        else:
-            win_buf = 0
-            loss_buf = 0
-    for _, row in full_df.iloc[::-1].iterrows():
-        if row['is_win']:
-            if curr_loss_streak == 0:
-                curr_win_streak += 1
-            else:
-                break
-        elif row['is_loss']:
-            if curr_win_streak == 0:
-                curr_loss_streak += 1
-            else:
-                break
-        else:
-            break
 
     wins = full_df[full_df['is_win']]
     losses = full_df[full_df['is_loss']]
     total_trades = len(full_df)
     total_pnl = full_df['total_pnl'].sum()
-    winrate = (len(wins) / max(total_trades, 1)) * 100
+    winrate = len(wins) / max(total_trades, 1) * 100
     profit_factor = wins['total_pnl'].sum() / abs(losses['total_pnl'].sum()) if len(losses) > 0 else float('inf')
     final_balance = INITIAL_BALANCE + total_pnl
 
     equity_df = pd.DataFrame(equity_curve, columns=['time', 'balance'])
     equity_df['peak'] = equity_df['balance'].cummax()
-    equity_df['drawdown'] = (equity_df['peak'] - equity_df['balance']) / equity_df['peak']
-    max_drawdown = equity_df['drawdown'].max() * 100
+    equity_df['dd'] = (equity_df['peak'] - equity_df['balance']) / equity_df['peak']
+    max_dd = equity_df['dd'].max() * 100
+
+    # Streaks
+    curr_win, curr_loss = 0, 0
+    win_buf, loss_buf = 0, 0
+    longest_win, longest_loss = 0, 0
+    for _, r in full_df.iterrows():
+        if r['is_win']:
+            win_buf += 1; loss_buf = 0
+            longest_win = max(longest_win, win_buf)
+        elif r['is_loss']:
+            loss_buf += 1; win_buf = 0
+            longest_loss = max(longest_loss, loss_buf)
+        else:
+            win_buf = loss_buf = 0
+    for _, r in full_df.iloc[::-1].iterrows():
+        if r['is_win']:
+            if curr_loss == 0: curr_win += 1
+            else: break
+        elif r['is_loss']:
+            if curr_win == 0: curr_loss += 1
+            else: break
+        else: break
 
     summary = (
         f"\n{'='*50}\n"
-        f"BACKTEST RESULTS (MACD Zero‑Line Crossover + 200 EMA, Tight Stop)\n"
+        f"BACKTEST RESULTS (EMA+BOLLINGER PULLBACK, 1:2 RR)\n"
         f"{'='*50}\n"
         f"Period: {BACKTEST_START} → {datetime.now().strftime('%Y-%m-%d')}\n"
         f"Initial Balance: ${INITIAL_BALANCE:.2f}\n"
@@ -371,11 +317,11 @@ def run_backtest():
         f"Winrate: {winrate:.1f}% ({len(wins)}W / {len(losses)}L)\n"
         f"Total P&L: ${total_pnl:.2f}\n"
         f"Profit Factor: {profit_factor:.2f}\n"
-        f"Max Drawdown: {max_drawdown:.2f}%\n"
-        f"Current Win Streak: {curr_win_streak} 🔥\n"
-        f"Current Loss Streak: {curr_loss_streak} 😞\n"
-        f"Longest Win Streak: {longest_win_streak}\n"
-        f"Longest Loss Streak: {longest_loss_streak}\n"
+        f"Max Drawdown: {max_dd:.2f}%\n"
+        f"Current Win Streak: {curr_win} 🔥\n"
+        f"Current Loss Streak: {curr_loss} 😞\n"
+        f"Longest Win Streak: {longest_win}\n"
+        f"Longest Loss Streak: {longest_loss}\n"
         f"Average R per trade: {total_pnl/(total_trades*INITIAL_BALANCE*RISK_PER_TRADE):.2f}\n"
         f"{'='*50}"
     )
