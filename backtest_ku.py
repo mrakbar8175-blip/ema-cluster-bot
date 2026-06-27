@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """
-KuCoin Historical Backtester – 4H & 1H data, 1:2 RR, HIGH-PROBABILITY FILTERS
-Hard BTC filter, tight 1H momentum/RSI, trend-confirmation rule.
-Original scoring layers preserved, minimum score 7.5.
+KuCoin Historical Backtester – 4H & 1H data, 1:2 RR, FRESH SCORING (no old bias)
 Usage: python backtest_ku.py FETCH    (download data)
        python backtest_ku.py BACKTEST (run simulation)
 """
@@ -37,7 +35,7 @@ CRYPTO_PAIRS = [
 ]
 
 # ============================================================
-# TECHNICAL INDICATORS (unchanged)
+# TECHNICAL INDICATORS
 # ============================================================
 def ema(series, period):
     return series.ewm(span=period, adjust=False).mean()
@@ -81,29 +79,24 @@ def adx(df, period=14):
     adx_val = dx.ewm(alpha=1/period, adjust=False).mean()
     return adx_val.iloc[-1], di_plus.iloc[-1], di_minus.iloc[-1]
 
-def support_resistance_levels(df, lookback=20):
-    recent = df.tail(lookback)
-    return recent['High'].max(), recent['Low'].min()
-
 # ============================================================
-# SCORING – all 11 layers, original weights, with hard filters
+# FRESH 1:2 SCORING – 7 binary checks, min score = 4
 # ============================================================
 def score_pair(df_4h, df_d, df_1h, btc_df_4h=None):
     """
-    Returns (total_score, direction, price, atr_val, swing_level, layers_dict)
-    Returns 0 and None for direction if any hard filter fails.
+    Returns (total_score, direction, price, atr_val, swing_level)
+    No old layers. 7 checks, each worth 1 point.
     """
-    # ---------- basic data checks ----------
     if df_d.empty or len(df_d) < 50:
-        return 0, None, None, None, None, {}
+        return 0, None, None, None, None
     if df_4h.empty or len(df_4h) < 50:
-        return 0, None, None, None, None, {}
+        return 0, None, None, None, None
     if df_1h.empty or len(df_1h) < 10:
-        return 0, None, None, None, None, {}
+        return 0, None, None, None, None
 
     price = df_4h['Close'].iloc[-1]
 
-    # ---------- daily trend direction ----------
+    # ---- Daily trend direction ----
     ema50_d = ema(df_d['Close'], 50)
     ema200_d = ema(df_d['Close'], 200)
     trend_daily = 0
@@ -111,148 +104,85 @@ def score_pair(df_4h, df_d, df_1h, btc_df_4h=None):
         trend_daily = 1
     elif price < ema50_d.iloc[-1] and ema50_d.iloc[-1] < ema200_d.iloc[-1]:
         trend_daily = -1
-
-    # Fallback to 4h
-    if trend_daily == 0:
-        ema50_4h = ema(df_4h['Close'], 50)
-        ema200_4h = ema(df_4h['Close'], 200)
-        if price > ema50_4h.iloc[-1] and ema50_4h.iloc[-1] > ema200_4h.iloc[-1]:
-            trend_daily = 1
-        elif price < ema50_4h.iloc[-1] and ema50_4h.iloc[-1] < ema200_4h.iloc[-1]:
-            trend_daily = -1
-        else:
-            return 0, None, None, None, None, {}
+    else:
+        return 0, None, None, None, None
 
     direction = "LONG" if trend_daily == 1 else "SHORT"
 
-    # ====== HARD FILTER 1: BTC trend alignment ======
+    # ---- HARD FILTER: BTC trend must align ----
     if btc_df_4h is not None and len(btc_df_4h) >= 50:
         btc_ema50 = ema(btc_df_4h['Close'], 50)
         btc_trend_up = btc_df_4h['Close'].iloc[-1] > btc_ema50.iloc[-1]
         if direction == "LONG" and not btc_trend_up:
-            return 0, None, None, None, None, {}
+            return 0, None, None, None, None
         if direction == "SHORT" and btc_trend_up:
-            return 0, None, None, None, None, {}
+            return 0, None, None, None, None
     else:
-        # no BTC data → skip this pair
-        return 0, None, None, None, None, {}
+        return 0, None, None, None, None
 
-    # ---------- compute all indicators ----------
+    # ---- Compute indicators ----
     ema50_4h = ema(df_4h['Close'], 50)
-    ema200_4h = ema(df_4h['Close'], 200)
-    adx_val, di_plus, di_minus = adx(df_4h)
-    rsi_val = rsi(df_4h)
-    macd_line, macd_signal, macd_hist, macd_hist_prev = macd(df_4h)
     atr_val = atr(df_4h)
-    res, sup = support_resistance_levels(df_4h, 20)
+    adx_val, di_plus, di_minus = adx(df_4h)
+    rsi_4h = rsi(df_4h)
+    macd_line, macd_signal, macd_hist, macd_hist_prev = macd(df_4h)
+    rsi_1h = rsi(df_1h, 14)
+    last_1h = df_1h.iloc[-1]
+    candle_range = last_1h['High'] - last_1h['Low']
+    bullish_momentum = (last_1h['Close'] - last_1h['Open']) / candle_range if candle_range > 0 else 0
 
-    # 1H momentum
-    rsi_1h_val = rsi(df_1h, 14)
-    last_candle_1h = df_1h.iloc[-1]
-    prev_candle_1h = df_1h.iloc[-2]
-    candle_range = last_candle_1h['High'] - last_candle_1h['Low']
-    bullish_momentum = (last_candle_1h['Close'] - last_candle_1h['Open']) / candle_range if candle_range > 0 else 0
-
-    # ====== HARD FILTER 2: tight 1H momentum ======
-    if direction == "LONG" and bullish_momentum <= 0.6:
-        return 0, None, None, None, None, {}
-    if direction == "SHORT" and bullish_momentum >= -0.6:
-        return 0, None, None, None, None, {}
-
-    # ====== HARD FILTER 3: tight 1H RSI ======
-    if rsi_1h_val is not None:
-        if direction == "LONG" and rsi_1h_val >= 60:
-            return 0, None, None, None, None, {}
-        if direction == "SHORT" and rsi_1h_val <= 40:
-            return 0, None, None, None, None, {}
-
-    # volume check
     vol_last = df_4h['Volume'].iloc[-1]
     vol_avg = df_4h['Volume'].iloc[-6:-1].mean() if len(df_4h) >= 6 else vol_last
     vol_surge = vol_last > vol_avg * 1.2 if vol_avg > 0 else False
 
-    # BTC market alignment (soft layer, but we already have hard filter, so it will always be true)
-    market_aligned = True   # guaranteed by hard filter
+    # ---- 7 binary checks ----
+    score = 0
 
-    def bool_score(cond):
-        return 1 if cond else 0
+    # 1. Pullback entry (price near 50 EMA on 4H)
+    if atr_val and not pd.isna(atr_val):
+        dist_to_ema = abs(price - ema50_4h.iloc[-1])
+        if dist_to_ema <= 1.5 * atr_val:
+            score += 1
 
-    # ====== BUILD ALL 11 LAYERS WITH ORIGINAL WEIGHTS ======
-    layers = {}
+    # 2. ADX > 20 (trending)
+    if adx_val and adx_val > 20:
+        score += 1
 
-    # 1. EMA Align
-    if direction == "LONG":
-        ema_align = price > ema50_4h.iloc[-1] and ema50_4h.iloc[-1] > ema200_4h.iloc[-1]
-    else:
-        ema_align = price < ema50_4h.iloc[-1] and ema50_4h.iloc[-1] < ema200_4h.iloc[-1]
-    layers["EMA Align"] = (bool_score(ema_align) * 1.5, 1.5, "OK")
+    # 3. 4H RSI confirms direction
+    if rsi_4h is not None:
+        if direction == "LONG" and rsi_4h > 50:
+            score += 1
+        elif direction == "SHORT" and rsi_4h < 50:
+            score += 1
 
-    # 2. ADX
-    adx_trending = adx_val > 20
-    adx_dir = (di_plus > di_minus) if direction == "LONG" else (di_minus > di_plus)
-    layers["ADX"] = (bool_score(adx_trending and adx_dir) * 1.0, 1.0, "OK")
+    # 4. 1H RSI confirms direction
+    if rsi_1h is not None:
+        if direction == "LONG" and rsi_1h > 50:
+            score += 1
+        elif direction == "SHORT" and rsi_1h < 50:
+            score += 1
 
-    # 3. RSI (4h)
-    if rsi_val is not None:
-        layers["RSI"] = (bool_score((direction == "LONG" and rsi_val > 50) or (direction == "SHORT" and rsi_val < 50)) * 1.5, 1.5, "OK")
-    else:
-        layers["RSI"] = (0, 1.5, "FAIL: RSI NaN")
-
-    # 4. MACD expansion
+    # 5. MACD histogram expanding
     macd_expanding = (direction == "LONG" and macd_hist > 0 and macd_hist > macd_hist_prev) or \
                      (direction == "SHORT" and macd_hist < 0 and macd_hist < macd_hist_prev)
-    layers["MACD"] = (bool_score(macd_expanding) * 1.0, 1.0, "OK")
+    if macd_expanding:
+        score += 1
 
-    # 5. S/R
-    if atr_val and atr_val > 0:
-        if direction == "LONG":
-            sr_score = bool_score((price - sup) < atr_val * 0.5)
-        else:
-            sr_score = bool_score((res - price) < atr_val * 0.5)
-        layers["S/R"] = (sr_score * 1.0, 1.0, "OK")
-    else:
-        layers["S/R"] = (0, 1.0, "FAIL: ATR missing")
+    # 6. Volume surge
+    if vol_surge:
+        score += 1
 
-    # 6. Volume
-    layers["Volume"] = (bool_score(vol_surge) * 0.5, 0.5, "OK")
+    # 7. 1H candle momentum
+    if direction == "LONG" and bullish_momentum > 0.6:
+        score += 1
+    elif direction == "SHORT" and bullish_momentum < -0.6:
+        score += 1
 
-    # 7. Market (BTC alignment)
-    layers["Market"] = (bool_score(market_aligned) * 0.5, 0.5, "OK")
+    # ---- Minimum score to pass ----
+    if score < 4:
+        return 0, None, None, None, None
 
-    # ====== HARD FILTER 4: trend-confirmation rule ======
-    # At least 2 of (EMA Align, ADX, MACD) must be true
-    trend_count = (layers["EMA Align"][0] > 0) + (layers["ADX"][0] > 0) + (layers["MACD"][0] > 0)
-    if trend_count < 2:
-        return 0, None, None, None, None, {}
-
-    # 8. Candle Mom (1h) – original weight
-    # The hard filter already ensures strong momentum, but we still score it fairly
-    candle_ok = (bullish_momentum > 0.6) if direction == "LONG" else (bullish_momentum < -0.6)
-    layers["Candle Mom"] = (bool_score(candle_ok) * 2.0, 2.0, "OK")
-
-    # 9. RSI 1h
-    if rsi_1h_val is not None:
-        # The hard filter already ensures RSI is in a favorable zone, but we still evaluate the original condition
-        rsi_1h_ok = (rsi_1h_val < 63) if direction == "LONG" else (rsi_1h_val > 37)
-        layers["RSI 1h"] = (bool_score(rsi_1h_ok) * 1.5, 1.5, "OK")
-    else:
-        layers["RSI 1h"] = (0, 1.5, "FAIL: RSI 1h NaN")
-
-    # 10. ATR
-    if atr_val and price > 0:
-        layers["ATR"] = (bool_score(atr_val > price * 0.005) * 1.0, 1.0, "OK")
-    else:
-        layers["ATR"] = (0, 1.0, "FAIL: ATR missing")
-
-    # 11. Micro Trend (1h)
-    if direction == "LONG":
-        micro_ok = last_candle_1h['Close'] > last_candle_1h['Open'] and prev_candle_1h['Close'] > prev_candle_1h['Open']
-    else:
-        micro_ok = last_candle_1h['Close'] < last_candle_1h['Open'] and prev_candle_1h['Close'] < prev_candle_1h['Open']
-    layers["Micro Trend"] = (bool_score(micro_ok) * 2.0, 2.0, "OK")
-
-    total = sum(score for score, _, _ in layers.values() if isinstance(score, (int, float)))
-    return total, direction, price, atr_val, (sup if direction == "LONG" else res), layers
+    return score, direction, price, atr_val, (ema50_4h.iloc[-1] if direction == "LONG" else ema50_4h.iloc[-1])
 
 # ============================================================
 # DATA FETCHING (unchanged)
@@ -302,7 +232,7 @@ def fetch_all_data():
             print(f"1H data exists for {pair}, skipping fetch.")
 
 # ============================================================
-# BACKTEST ENGINE (1:2 RR, HIGH-PROBABILITY, MIN SCORE 7.5)
+# BACKTEST ENGINE (1:2 RR, FRESH SCORING)
 # ============================================================
 def run_backtest():
     print("Loading data into memory...")
@@ -335,9 +265,7 @@ def run_backtest():
     trade_log = []
     equity_curve = []
 
-    MIN_SCORE = 7.5   # out of 13.5
-
-    print(f"Running HIGH-PROBABILITY BACKTEST (1:2 RR, min score {MIN_SCORE})...")
+    print(f"Running FRESH 1:2 RR BACKTEST (min score 4/7)...")
     print(f"Timeline: {len(timeline)} 4H candles")
 
     for current_time in timeline:
@@ -406,8 +334,8 @@ def run_backtest():
                 if len(df_4h) < 50:
                     continue
                 btc_ctx = btc_4h.loc[:current_time]
-                score, direction, price, atr_val, swing_level, layers = score_pair(df_4h, df_d, df_1h, btc_ctx)
-                if direction is None or score < MIN_SCORE:
+                score, direction, price, atr_val, swing_level = score_pair(df_4h, df_d, df_1h, btc_ctx)
+                if direction is None or score < 4:
                     continue
 
                 # Compute stop and TP (2R)
@@ -535,7 +463,7 @@ def run_backtest():
 
     summary = (
         f"\n{'='*50}\n"
-        f"BACKTEST RESULTS (1:2 RR, HIGH-PROBABILITY FILTERS)\n"
+        f"BACKTEST RESULTS (1:2 RR, FRESH SCORING)\n"
         f"{'='*50}\n"
         f"Period: {BACKTEST_START} → {datetime.now().strftime('%Y-%m-%d')}\n"
         f"Initial Balance: ${INITIAL_BALANCE:.2f}\n"
