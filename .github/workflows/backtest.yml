@@ -1,0 +1,45 @@
+name: KuCoin Full Backtest
+
+on:
+  workflow_dispatch:   # you trigger it manually
+
+jobs:
+  fetch-and-backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install ccxt pandas numpy pyarrow requests
+
+      - name: Cache KuCoin data (keyed by week – refreshes weekly)
+        uses: actions/cache@v4
+        id: cache
+        with:
+          path: kucoin_data
+          key: kucoin-${{ github.run_week }}
+
+      - name: Fetch historical data (only if cache miss)
+        run: |
+          mkdir -p kucoin_data
+          python backtest_ku.py FETCH
+
+      - name: Run backtest
+        run: python backtest_ku.py BACKTEST
+
+      - name: Upload backtest results
+        uses: actions/upload-artifact@v4
+        with:
+          name: backtest-output
+          path: |
+            backtest_summary.txt
+            backtest_trades.csv
