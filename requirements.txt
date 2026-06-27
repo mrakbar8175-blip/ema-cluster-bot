@@ -1,6 +1,5 @@
-pandas
-numpy
-yfinance
-matplotlib
-mplfinance
-requests
+ccxt>=4.0.0
+pandas>=2.0.0
+numpy>=1.24.0
+pyarrow>=12.0.0
+requests>=2.31.0
