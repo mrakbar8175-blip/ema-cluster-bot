@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-KuCoin Historical Backtester – 4H Micro‑Stop Pullback, 1:2 RR
-Tight stop (0.5x ATR or swing level), target = 1x ATR (2R).
-Strong trend filter, BTC aligned, volume‑confirmed reversal candle.
+KuCoin Historical Backtester – Relaxed EMA Pullback, 1:2 RR, Micro‑Stop
+Tight stop (0.5× ATR), target = 1× ATR (2R).
+Relaxed entry: any pullback near 50‑EMA that shows trend resumption.
+Strong trend + BTC filter. Top‑50 coins.
 Usage: python backtest_ku.py FETCH    (download data)
        python backtest_ku.py BACKTEST (run simulation)
 """
@@ -47,33 +48,13 @@ def atr(df, period=14):
     tr = pd.concat([h - l, (h - c.shift()).abs(), (l - c.shift()).abs()], axis=1).max(axis=1)
     return tr.rolling(period).mean().iloc[-1]
 
-def body_ratio(candle):
-    """Return body / (high - low) for a candle."""
-    rng = candle['High'] - candle['Low']
-    if rng == 0:
-        return 0
-    return abs(candle['Close'] - candle['Open']) / rng
-
-def lower_wick_ratio(candle):
-    """Return lower wick / candle range."""
-    rng = candle['High'] - candle['Low']
-    if rng == 0:
-        return 0
-    return (min(candle['Open'], candle['Close']) - candle['Low']) / rng
-
-def upper_wick_ratio(candle):
-    """Return upper wick / candle range."""
-    rng = candle['High'] - candle['Low']
-    if rng == 0:
-        return 0
-    return (candle['High'] - max(candle['Open'], candle['Close'])) / rng
-
 # ============================================================
-# MICRO‑STOP PULLBACK ENTRY
+# RELAXED PULLBACK ENTRY (high frequency)
 # ============================================================
 def detect_entry(df_4h, btc_df_4h=None):
     """
     Returns (direction, entry_price, stop_loss, tp) or (None,None,None,None)
+    Relaxed entry: any candle closing in trend direction while price near 50-EMA.
     """
     if df_4h.empty or len(df_4h) < 70:
         return None, None, None, None
@@ -99,48 +80,64 @@ def detect_entry(df_4h, btc_df_4h=None):
     else:
         return None, None, None, None
 
+    # Relaxed: check last 3 candles for a touch of EMA50 and a bullish/bearish close
     last = df_4h.iloc[-1]
-    prev = df_4h.iloc[-2]
-    vol_last = last['Volume']
-    vol_avg = df_4h['Volume'].iloc[-21:-1].mean() if len(df_4h) >= 21 else vol_last
+    prev2 = df_4h.iloc[-2]
+    prev3 = df_4h.iloc[-3]
 
-    # Volume must be above average
-    if vol_avg > 0 and vol_last < vol_avg * 1.2:
-        return None, None, None, None
-
-    # Reversal candle detection
+    # ----- LONG SETUP -----
     if uptrend and btc_trend_up:
-        # Check if price dipped near EMA50 (within 1.0 ATR)
-        if prev['Low'] > ema50.iloc[-2] - 1.0 * atr_val and prev['Low'] < ema50.iloc[-2] + 0.3 * atr_val:
-            # Reversal: hammer (long lower wick, small body, closing near high)
-            hammer_condition = (lower_wick_ratio(last) > 0.6 and body_ratio(last) < 0.4 and last['Close'] > last['Open'])
-            if hammer_condition:
-                entry = price
-                # Stop = below the hammer's low (tight)
-                stop = last['Low'] - 0.1 * atr_val
-                # Ensure stop is not too far (max 0.7 ATR)
-                if entry - stop > 0.7 * atr_val:
-                    return None, None, None, None
-                risk = entry - stop
-                if risk <= 0:
-                    return None, None, None, None
-                tp = entry + 2 * risk
-                return "LONG", entry, stop, tp
+        # Check if any of the last 3 candles touched near EMA50 (within 1.5 ATR)
+        touched_ema = False
+        for candle in [last, prev2, prev3]:
+            if abs(candle['Low'] - ema50.iloc[-1]) < 1.5 * atr_val:
+                touched_ema = True
+                break
+        # Also check if current candle is green (closing above open)
+        is_green = last['Close'] > last['Open']
+        # Also check if price is not too far above EMA (max 2 ATR)
+        near_ema = abs(price - ema50.iloc[-1]) < 2.0 * atr_val
 
+        if touched_ema and is_green and near_ema:
+            entry = price
+            # Stop = recent swing low (tight)
+            recent_low = df_4h['Low'].iloc[-5:].min()
+            stop = min(recent_low, ema50.iloc[-1] - 0.5 * atr_val)
+            # Ensure stop is tight (max 0.7 ATR away)
+            if entry - stop > 0.7 * atr_val:
+                stop = entry - 0.6 * atr_val
+            if entry - stop < 0.2 * atr_val:
+                # Too tight, use 0.3 ATR minimum
+                stop = entry - 0.3 * atr_val
+            risk = entry - stop
+            if risk <= 0:
+                return None, None, None, None
+            tp = entry + 2 * risk
+            return "LONG", entry, stop, tp
+
+    # ----- SHORT SETUP -----
     if downtrend and not btc_trend_up:
-        if prev['High'] < ema50.iloc[-2] + 1.0 * atr_val and prev['High'] > ema50.iloc[-2] - 0.3 * atr_val:
-            # Shooting star: long upper wick, small body, closing near low
-            star_condition = (upper_wick_ratio(last) > 0.6 and body_ratio(last) < 0.4 and last['Close'] < last['Open'])
-            if star_condition:
-                entry = price
-                stop = last['High'] + 0.1 * atr_val
-                if stop - entry > 0.7 * atr_val:
-                    return None, None, None, None
-                risk = stop - entry
-                if risk <= 0:
-                    return None, None, None, None
-                tp = entry - 2 * risk
-                return "SHORT", entry, stop, tp
+        touched_ema = False
+        for candle in [last, prev2, prev3]:
+            if abs(candle['High'] - ema50.iloc[-1]) < 1.5 * atr_val:
+                touched_ema = True
+                break
+        is_red = last['Close'] < last['Open']
+        near_ema = abs(price - ema50.iloc[-1]) < 2.0 * atr_val
+
+        if touched_ema and is_red and near_ema:
+            entry = price
+            recent_high = df_4h['High'].iloc[-5:].max()
+            stop = max(recent_high, ema50.iloc[-1] + 0.5 * atr_val)
+            if stop - entry > 0.7 * atr_val:
+                stop = entry + 0.6 * atr_val
+            if stop - entry < 0.2 * atr_val:
+                stop = entry + 0.3 * atr_val
+            risk = stop - entry
+            if risk <= 0:
+                return None, None, None, None
+            tp = entry - 2 * risk
+            return "SHORT", entry, stop, tp
 
     return None, None, None, None
 
@@ -214,7 +211,7 @@ def run_backtest():
     trade_log = []
     equity_curve = []
 
-    print(f"Running MICRO‑STOP PULLBACK (1:2 RR) from {start_date.date()} to {end_date.date()}...")
+    print(f"Running RELAXED PULLBACK (1:2 RR, micro‑stop) from {start_date.date()} to {end_date.date()}...")
     print(f"Timeline: {len(timeline)} 4H candles")
 
     for current_time in timeline:
@@ -295,17 +292,15 @@ def run_backtest():
                     'quantity': quantity,
                     'original_qty': quantity
                 })
-            # Add trades up to limit
             for trade in candidates:
                 if risky_count >= MAX_RISKY_TRADES:
                     break
                 open_trades.append(trade)
                 risky_count += 1
 
-        # Record equity
         equity_curve.append((current_time, balance))
 
-    # Close any remaining trades at last price
+    # Close remaining trades at last price
     for trade in open_trades:
         sym = trade['symbol']
         if sym in data:
@@ -325,7 +320,6 @@ def run_backtest():
             })
             balance += pnl
 
-    # Performance metrics with streaks
     if not trade_log:
         print("No trades were generated.")
         return
@@ -345,7 +339,6 @@ def run_backtest():
     full_df['is_win'] = full_df['total_pnl'] > 0
     full_df['is_loss'] = full_df['total_pnl'] < 0
 
-    # Streaks
     curr_win_streak = 0
     curr_loss_streak = 0
     longest_win_streak = 0
@@ -393,7 +386,7 @@ def run_backtest():
 
     summary = (
         f"\n{'='*50}\n"
-        f"BACKTEST RESULTS (MICRO‑STOP PULLBACK, 1:2 RR)\n"
+        f"BACKTEST RESULTS (RELAXED PULLBACK, 1:2 RR, MICRO‑STOP)\n"
         f"{'='*50}\n"
         f"Period: {BACKTEST_START} → {datetime.now().strftime('%Y-%m-%d')}\n"
         f"Initial Balance: ${INITIAL_BALANCE:.2f}\n"
