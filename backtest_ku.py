@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 KuCoin Historical Backtester – 4H Breakout Strategy, 1:2 RR
-Enters on range breakout + volume confirmation.
-Tight stop, 2R target. BTC trend filter. Top-20 liquid coins.
+Volume‑confirmed breakout from 20‑bar range (excluding current bar).
+BTC trend filter. Top‑20 liquid coins.
 Usage: python backtest_ku.py FETCH    (download data)
        python backtest_ku.py BACKTEST (run simulation)
 """
@@ -23,7 +23,7 @@ RISK_PER_TRADE = 0.01
 MAX_RISKY_TRADES = 5
 DATA_FOLDER = "kucoin_data"
 
-# Top‑20 most liquid coins (reliable trending behaviour)
+# Top‑20 most liquid coins
 CRYPTO_PAIRS = [
     "BTC-USDT","ETH-USDT","BNB-USDT","SOL-USDT","XRP-USDT",
     "ADA-USDT","DOGE-USDT","DOT-USDT","MATIC-USDT","LINK-USDT",
@@ -32,7 +32,7 @@ CRYPTO_PAIRS = [
 ]
 
 # ============================================================
-# TECHNICAL INDICATORS (only needed for breakout detection)
+# TECHNICAL INDICATORS
 # ============================================================
 def ema(series, period):
     return series.ewm(span=period, adjust=False).mean()
@@ -43,48 +43,46 @@ def atr(df, period=14):
     return tr.rolling(period).mean().iloc[-1]
 
 # ============================================================
-# BREAKOUT SIGNAL LOGIC
+# BREAKOUT DETECTION (FIXED)
 # ============================================================
 def detect_breakout(df_4h, btc_df_4h=None):
     """
-    Returns (direction, entry_price, stop_loss, tp) or (None, None, None, None)
+    Returns (direction, entry_price, stop_loss, tp) or (None,None,None,None)
     """
     if df_4h.empty or len(df_4h) < 30:
         return None, None, None, None
 
+    # Current bar
     price = df_4h['Close'].iloc[-1]
-    high = df_4h['High'].iloc[-1]
-    low = df_4h['Low'].iloc[-1]
     volume = df_4h['Volume'].iloc[-1]
 
-    # Lookback period for range (last 20 bars)
-    lookback = 20
-    recent = df_4h.tail(lookback)
-    range_high = recent['High'].max()
-    range_low = recent['Low'].min()
-
-    # Require a clear range (at least 1% width)
-    if (range_high - range_low) / price < 0.01:
+    # Lookback = previous 20 bars (excluding current)
+    recent = df_4h.iloc[-21:-1]   # bars -21 to -2 (20 bars)
+    if len(recent) < 20:
         return None, None, None, None
 
-    # Volume average (last 20 bars)
+    range_high = recent['High'].max()
+    range_low = recent['Low'].min()
     vol_avg = recent['Volume'].mean()
 
-    # Breakout condition: current bar closed above range_high (long) or below range_low (short)
-    # AND volume > 1.5 * average
-    if price > range_high and volume > vol_avg * 1.5:
+    # Minimum volume condition (relaxed)
+    if vol_avg == 0 or volume < vol_avg * 1.2:
+        return None, None, None, None
+
+    # Breakout direction
+    if price > range_high:
         direction = "LONG"
-        # Stop loss just below range_low (tight)
-        stop = range_low - 0.005 * price   # small buffer
+        # Stop = range_low (the floor of the consolidation)
+        stop = range_low
         entry = price
-    elif price < range_low and volume > vol_avg * 1.5:
+    elif price < range_low:
         direction = "SHORT"
-        stop = range_high + 0.005 * price
+        stop = range_high
         entry = price
     else:
         return None, None, None, None
 
-    # BTC filter: trade only if BTC 4h close > 50-EMA for longs, < 50-EMA for shorts
+    # BTC filter
     if btc_df_4h is not None and len(btc_df_4h) >= 50:
         btc_ema50 = ema(btc_df_4h['Close'], 50)
         btc_trend_up = btc_df_4h['Close'].iloc[-1] > btc_ema50.iloc[-1]
@@ -95,10 +93,10 @@ def detect_breakout(df_4h, btc_df_4h=None):
     else:
         return None, None, None, None
 
+    # Calculate risk and target
     risk = abs(entry - stop)
-    if risk == 0:
+    if risk <= 0:
         return None, None, None, None
-    # 2R target
     if direction == "LONG":
         tp = entry + 2 * risk
     else:
@@ -258,7 +256,7 @@ def run_backtest():
                     'quantity': quantity,
                     'original_qty': quantity
                 })
-                # Only one new trade per bar to avoid overloading
+                # Only one new trade per bar
                 break
 
         # Record equity
