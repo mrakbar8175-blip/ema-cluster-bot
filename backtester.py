@@ -4,13 +4,20 @@ Swing Sentinel – Historical Backtester (No Look‑Ahead Bias)
 Dynamic end date – defaults to today.
 """
 
+# ----------------------------------------------
+# Fix for GitHub Actions (no Discord/Groq needed)
+import os
+os.environ["DISCORD_WEBHOOK_URL"] = "https://dummy.example.com"
+os.environ["GROQ_API_KEY"] = "dummy"
+# ----------------------------------------------
+
 import pandas as pd
 import numpy as np
 import yfinance as yf
 from datetime import datetime, timedelta
-import math, sys, os, json, time
+import math, sys, json, time
 
-# Import bot’s configuration and logic
+# Import bot’s configuration and logic (now with dummy env vars set)
 from swing_sentinel import (
     CONFIG, score_pair, to_yahoo, get_hybrid_klines,
     ema, atr, rsi, macd, adx, support_resistance_levels,
@@ -333,13 +340,6 @@ class BacktestEngine:
             "highest_tp": -1,
             "breakeven": False
         }
-        # Deduct cost of the position from balance (cash account)
-        # We assume we use the full balance to buy the asset.
-        # However, for simplicity we'll just deduct the entry fee; the position value is not subtracted.
-        # This is a simplification: in a real cash account, you'd subtract quantity * filled_entry.
-        # For backtesting the 1% risk model, this doesn't affect the risk logic because we only risk 1%.
-        # We'll keep this note and proceed.
-        # (A more accurate simulation would track position value and margin.)
         return trade
 
     # -----------------------------------------------------------------
@@ -439,14 +439,12 @@ class BacktestEngine:
                         if i == 0:
                             breakeven = True
                         # Update current_stop after each partial fill
-                        # We can recalc from trade dict:
                         trade["highest_tp"] = highest_tp_idx
                         trade["breakeven"] = breakeven
                         current_stop = get_current_stop(trade)
                     if remaining_qty <= 0:
                         trade_closed = True
                         break
-                # If trade closed, break the candle loop
                 if trade_closed:
                     break
 
@@ -499,10 +497,6 @@ class BacktestEngine:
             # 3. Try to open a new trade
             signal = self.generate_signal_at(current_date)
             if signal is not None:
-                # Deduct the cost of the position (entry fee already deducted; position value not deducted)
-                # For a proper cash simulation, you'd deduct the asset cost here.
-                # We'll assume the balance can go negative if needed, or we can simply ignore.
-                # Since we only risk 1% of balance, we don't need to simulate the full position cost.
                 self.open_trades.append(signal)
 
         # Save results
