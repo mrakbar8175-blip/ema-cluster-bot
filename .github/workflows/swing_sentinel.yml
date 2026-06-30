@@ -1,0 +1,24 @@
+name: Swing Sentinel Crypto Bot
+
+on:
+  workflow_dispatch:   # Manual trigger only (Actions tab → Run workflow)
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install pandas numpy yfinance requests matplotlib mplfinance
+
+      - name: Run Swing Sentinel
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: python swing_sentinel.py
