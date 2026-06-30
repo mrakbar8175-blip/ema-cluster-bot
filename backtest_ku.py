@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-Raw Indicator Extractor – KuCoin API, 2‑year history
-Exports every 4H candle with all indicators for liquid momentum coins.
+Raw Indicator Extractor – KuCoin API, 2‑year history (fixed symbol mapping)
 """
 
 import sys, os, time, json
@@ -13,7 +12,6 @@ import warnings
 warnings.filterwarnings("ignore")
 
 # ========== CONFIG ==========
-# 2 years of history (KuCoin can go further, but 2 years is a solid sample)
 YEARS_BACK = 2
 OUTPUT_FILE = "raw_indicator_data_2y.csv"
 CACHE_DIR = "cache"
@@ -47,33 +45,62 @@ def fetch_current_momentum_coins(limit=100, momentum_top=20):
             momentum = abs(roc_14) if roc_14 is not None else 0.0
             candidates.append((symbol, momentum))
         candidates.sort(key=lambda x: x[1], reverse=True)
-        top_symbols = [sym for sym, _ in candidates[:momentum_top]]
-        return [f"{sym}-USDT" for sym in top_symbols]   # KuCoin format
+        return [sym for sym, _ in candidates[:momentum_top]]
     except Exception as e:
-        print(f"CoinGecko error: {e}. Using fallback list.")
-        fallback = [
-            "BTC-USDT","ETH-USDT","BNB-USDT","SOL-USDT","XRP-USDT",
-            "ADA-USDT","DOGE-USDT","DOT-USDT","MATIC-USDT","LINK-USDT",
-            "AVAX-USDT","SHIB-USDT","UNI-USDT","LTC-USDT","ATOM-USDT"
-        ]
-        return fallback[:momentum_top]
+        print(f"CoinGecko error: {e}.")
+        return []
 
-print("🌍 Fetching current momentum universe...")
-COINS = fetch_current_momentum_coins(limit=100, momentum_top=20)
-print(f"Coins: {COINS}")
+def fetch_kucoin_usdt_symbols():
+    """Return set of symbols like 'BTC-USDT' that are tradeable on KuCoin."""
+    try:
+        resp = requests.get("https://api.kucoin.com/api/v1/symbols", timeout=10)
+        data = resp.json()
+        if data.get("code") != "200000":
+            return set()
+        symbols = set()
+        for item in data["data"]:
+            if item["quoteCurrency"] == "USDT" and item["enableTrading"]:
+                symbols.add(item["symbol"])   # e.g. "BTC-USDT"
+        return symbols
+    except:
+        return set()
+
+def build_valid_coin_list(max_coins=20):
+    """Get momentum coins, cross‑check with KuCoin, return list of KuCoin symbols."""
+    momentum = fetch_current_momentum_coins(limit=100, momentum_top=max_coins)
+    if not momentum:
+        momentum = ["BTC", "ETH", "BNB", "SOL", "XRP", "ADA", "DOGE", "DOT", "MATIC", "LINK",
+                    "AVAX", "SHIB", "UNI", "LTC", "ATOM", "NEAR", "FIL", "APT", "ARB", "OP"]
+    print(f"   Momentum coins from CoinGecko: {momentum[:20]}")
+    kucoin_symbols = fetch_kucoin_usdt_symbols()
+    print(f"   KuCoin USDT pairs count: {len(kucoin_symbols)}")
+    valid = []
+    for sym in momentum:
+        pair = f"{sym}-USDT"
+        if pair in kucoin_symbols:
+            valid.append(pair)
+        else:
+            print(f"   ⚠️ {pair} not found on KuCoin, skipping.")
+    if len(valid) < 5:
+        # fallback to liquid majors if too few remain
+        fallback = ["BTC-USDT","ETH-USDT","BNB-USDT","SOL-USDT","XRP-USDT",
+                    "ADA-USDT","DOGE-USDT","DOT-USDT","MATIC-USDT","LINK-USDT",
+                    "AVAX-USDT","SHIB-USDT","UNI-USDT","LTC-USDT","ATOM-USDT",
+                    "NEAR-USDT","FIL-USDT","APT-USDT","ARB-USDT","OP-USDT"]
+        valid = [f for f in fallback if f in kucoin_symbols][:max_coins]
+        print("   Using fallback liquid list.")
+    print(f"✅ Final coin list ({len(valid)} coins): {valid}")
+    return valid
+
+COINS = build_valid_coin_list(max_coins=20)
+if not COINS:
+    print("❌ No valid coins found. Exiting.")
+    sys.exit(1)
 
 # ========== Kucoin API helpers ==========
 KUCOIN_BASE = "https://api.kucoin.com"
 def get_kucoin_klines(symbol, interval, start_time, end_time, limit=1000):
-    """
-    Fetch klines from KuCoin. Returns list of candles (list of lists).
-    Timestamps in seconds, start_time/end_time as datetimes.
-    """
-    # Map interval to KuCoin format
-    interval_map = {
-        "1h": "1hour",
-        "4h": "4hour",
-    }
+    interval_map = {"1h": "1hour", "4h": "4hour", "1d": "1day"}
     kucoin_interval = interval_map.get(interval, interval)
     url = f"{KUCOIN_BASE}/api/v1/market/candles"
     params = {
@@ -93,22 +120,16 @@ def get_kucoin_klines(symbol, interval, start_time, end_time, limit=1000):
         return []
 
 def fetch_ohlcv_kucoin(symbol, interval, start_date, end_date):
-    """
-    Fetch all candles between start_date and end_date using pagination.
-    Returns DataFrame with columns: open_time, Open, High, Low, Close, Volume.
-    """
     all_candles = []
     chunk_end = end_date
     while chunk_end > start_date:
-        chunk_start = chunk_end - timedelta(hours=1000 * 1)  # ~41 days at 1h, but API max 1000 candles
+        chunk_start = chunk_end - timedelta(hours=1000)  # safe chunk
         if chunk_start < start_date:
             chunk_start = start_date
         candles = get_kucoin_klines(symbol, interval, chunk_start, chunk_end, limit=1000)
         if not candles:
-            # If no data, move back and continue (maybe early coin)
             chunk_end = chunk_start
             continue
-        # Convert to DataFrame rows
         for c in candles:
             ts = datetime.utcfromtimestamp(int(c[0]))
             row = {
@@ -120,47 +141,41 @@ def fetch_ohlcv_kucoin(symbol, interval, start_date, end_date):
                 "Volume": float(c[5]),
             }
             all_candles.append(row)
-        # Next chunk: use the earliest timestamp in this batch minus 1 hour to avoid overlap
         earliest_ts = min(int(c[0]) for c in candles)
         chunk_end = datetime.utcfromtimestamp(earliest_ts) - timedelta(hours=1)
-        time.sleep(0.2)   # be gentle
+        time.sleep(0.15)
     if not all_candles:
         return pd.DataFrame()
     df = pd.DataFrame(all_candles).drop_duplicates(subset=["open_time"]).sort_values("open_time")
     df.set_index("open_time", inplace=True)
     return df
 
-# ========== CACHE SYSTEM ==========
+# ========== CACHE ==========
 os.makedirs(CACHE_DIR, exist_ok=True)
 
 def cached_kucoin_fetch(symbol, interval, start_date, end_date):
     fname = os.path.join(CACHE_DIR, f"{symbol}_{interval}_{start_date.strftime('%Y%m%d')}_{end_date.strftime('%Y%m%d')}.csv")
     if os.path.exists(fname):
         print(f"   Loading cached {fname}")
-        df = pd.read_csv(fname, index_col=0, parse_dates=True)
-        return df
+        return pd.read_csv(fname, index_col=0, parse_dates=True)
     print(f"   Fetching KuCoin {symbol} {interval} from {start_date.date()} to {end_date.date()}...")
     df = fetch_ohlcv_kucoin(symbol, interval, start_date, end_date)
     if not df.empty:
         df.to_csv(fname)
     return df
 
-# ========== INDICATOR COMPUTATION (same as before) ==========
-def compute_all_indicators(df_4h, df_daily, df_1h, df_btc_4h):
-    """Returns a DataFrame indexed by 4H timestamp with all indicators."""
+# ========== INDICATORS ==========
+def compute_all_indicators(df_4h, df_daily_raw, df_1h, df_btc_4h):
     d = df_4h[['Open','High','Low','Close','Volume']].copy()
     d.index.name = 'timestamp'
 
-    # 4H EMAs
     d['EMA50_4h'] = d['Close'].ewm(span=50, adjust=False).mean()
     d['EMA200_4h'] = d['Close'].ewm(span=200, adjust=False).mean()
 
-    # ATR
     h, l, c = d['High'], d['Low'], d['Close']
     tr = pd.concat([h-l, (h-c.shift()).abs(), (l-c.shift()).abs()], axis=1).max(axis=1)
     d['ATR_4h'] = tr.rolling(14).mean()
 
-    # RSI 4H
     delta = d['Close'].diff()
     gain = delta.where(delta > 0, 0.0)
     loss = -delta.where(delta < 0, 0.0)
@@ -169,7 +184,6 @@ def compute_all_indicators(df_4h, df_daily, df_1h, df_btc_4h):
     rs = avg_gain / avg_loss
     d['RSI_4h'] = 100 - (100 / (1 + rs))
 
-    # MACD
     exp1 = d['Close'].ewm(span=12, adjust=False).mean()
     exp2 = d['Close'].ewm(span=26, adjust=False).mean()
     macd_line = exp1 - exp2
@@ -178,7 +192,6 @@ def compute_all_indicators(df_4h, df_daily, df_1h, df_btc_4h):
     d['MACD_signal'] = macd_signal
     d['MACD_hist'] = macd_line - macd_signal
 
-    # ADX
     dm_plus = h.diff()
     dm_minus = -l.diff()
     dm_plus[dm_plus < 0] = 0
@@ -191,24 +204,26 @@ def compute_all_indicators(df_4h, df_daily, df_1h, df_btc_4h):
     d['DI_plus'] = di_plus
     d['DI_minus'] = di_minus
 
-    # Volume surge
     d['Volume_surge'] = d['Volume'] > (d['Volume'].shift(1).rolling(5).mean() * 1.2)
 
-    # Support/Resistance
     d['SR_High_20'] = d['High'].rolling(20).max()
     d['SR_Low_20'] = d['Low'].rolling(20).min()
 
-    # Daily context aligned to 4H
-    if not df_daily.empty:
-        daily_ema50 = df_daily['Close'].ewm(span=50, adjust=False).mean()
-        daily_ema200 = df_daily['Close'].ewm(span=200, adjust=False).mean()
+    # Daily context – if daily_raw is available, use it; else compute from 4h resample
+    if not df_daily_raw.empty:
+        daily_ema50 = df_daily_raw['Close'].ewm(span=50, adjust=False).mean()
+        daily_ema200 = df_daily_raw['Close'].ewm(span=200, adjust=False).mean()
         daily_ema50_aligned = daily_ema50.reindex(d.index, method='ffill')
         daily_ema200_aligned = daily_ema200.reindex(d.index, method='ffill')
-        d['daily_EMA50'] = daily_ema50_aligned
-        d['daily_EMA200'] = daily_ema200_aligned
     else:
-        d['daily_EMA50'] = np.nan
-        d['daily_EMA200'] = np.nan
+        # fallback: resample 4h to daily and compute
+        df_daily_fallback = d['Close'].resample('D').last().dropna()
+        daily_ema50 = df_daily_fallback.ewm(span=50, adjust=False).mean()
+        daily_ema200 = df_daily_fallback.ewm(span=200, adjust=False).mean()
+        daily_ema50_aligned = daily_ema50.reindex(d.index, method='ffill')
+        daily_ema200_aligned = daily_ema200.reindex(d.index, method='ffill')
+    d['daily_EMA50'] = daily_ema50_aligned
+    d['daily_EMA200'] = daily_ema200_aligned
 
     # BTC 4H context
     if not df_btc_4h.empty:
@@ -220,9 +235,8 @@ def compute_all_indicators(df_4h, df_daily, df_1h, df_btc_4h):
         d['BTC_close_4h'] = np.nan
         d['BTC_EMA50_4h'] = np.nan
 
-    # 1H indicators (resampled to 4H timestamps)
+    # 1H indicators
     if not df_1h.empty:
-        # RSI 1H
         delta_1h = df_1h['Close'].diff()
         gain_1h = delta_1h.where(delta_1h > 0, 0.0)
         loss_1h = -delta_1h.where(delta_1h < 0, 0.0)
@@ -241,32 +255,28 @@ def compute_all_indicators(df_4h, df_daily, df_1h, df_btc_4h):
         d['1h_RSI'] = np.nan
         d['1h_bullish_momentum'] = np.nan
 
-    # Future returns
-    d['fwd_return_1d'] = d['Close'].shift(-6) / d['Close'] - 1   # 6 * 4h = 1 day
-    d['fwd_return_1w'] = d['Close'].shift(-42) / d['Close'] - 1  # 7 days
-    d['fwd_return_2w'] = d['Close'].shift(-84) / d['Close'] - 1  # 14 days
+    d['fwd_return_1d'] = d['Close'].shift(-6) / d['Close'] - 1
+    d['fwd_return_1w'] = d['Close'].shift(-42) / d['Close'] - 1
+    d['fwd_return_2w'] = d['Close'].shift(-84) / d['Close'] - 1
 
     return d
 
 # ========== MAIN ==========
 def main():
-    # time window: last YEARS_BACK years
     end_date = datetime.now()
     start_date = end_date - timedelta(days=365 * YEARS_BACK)
     print(f"⏱️ Data window: {start_date.date()} → {end_date.date()}")
 
-    # --- BTC data (market context) ---
-    print("📦 Fetching BTC 1h data (for resampling to 4h)...")
+    print("📦 Fetching BTC 1h data...")
     btc_1h = cached_kucoin_fetch("BTC-USDT", "1h", start_date, end_date)
     if btc_1h.empty:
-        print("❌ BTC data unavailable. Exiting.")
+        print("❌ BTC 1h data unavailable.")
         sys.exit(1)
     btc_4h = btc_1h.resample('4h').agg({
-        'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'
+        'Open':'first','High':'max','Low':'min','Close':'last','Volume':'sum'
     }).dropna()
 
-    # --- BTC daily data for daily indicators of BTC (not strictly needed but helpful) ---
-    print("📦 Fetching BTC daily data...")
+    # BTC daily (optional)
     btc_daily = cached_kucoin_fetch("BTC-USDT", "1d", start_date, end_date)
 
     all_coin_data = []
@@ -274,41 +284,34 @@ def main():
     for i, sym in enumerate(COINS):
         print(f"\n⏳ Processing {sym} ({i+1}/{len(COINS)})")
         try:
-            # 1H data
             df_1h = cached_kucoin_fetch(sym, "1h", start_date, end_date)
             if df_1h.empty:
-                print(f"   No 1H data for {sym}, skipping.")
+                print(f"   No 1H data, skipping.")
                 continue
 
-            # Resample to 4H
             df_4h = df_1h.resample('4h').agg({
-                'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'
+                'Open':'first','High':'max','Low':'min','Close':'last','Volume':'sum'
             }).dropna()
 
-            # Daily data
+            # Try daily, but we don't skip if missing – fallback inside compute
             df_daily = cached_kucoin_fetch(sym, "1d", start_date, end_date)
-            if df_daily.empty:
-                print(f"   No daily data for {sym}, skipping.")
-                continue
 
-            # Compute indicators
             result = compute_all_indicators(df_4h, df_daily, df_1h, btc_4h)
             result['symbol'] = sym
             all_coin_data.append(result)
             print(f"   {len(result)} rows added.")
-            time.sleep(0.2)
+            time.sleep(0.1)
         except Exception as e:
             print(f"   Error on {sym}: {e}")
 
     if not all_coin_data:
-        print("❌ No data collected. Exiting.")
+        print("❌ No data collected.")
         sys.exit(1)
 
     final_df = pd.concat(all_coin_data)
-    final_df = final_df.reset_index().sort_values(['symbol', 'timestamp'])
+    final_df = final_df.reset_index().sort_values(['symbol','timestamp'])
     final_df.to_csv(OUTPUT_FILE, index=False)
-    print(f"\n✅ Done! File saved to {OUTPUT_FILE} with {len(final_df)} rows.")
-    print("   Upload this artifact and send the CSV for quant analysis.")
+    print(f"\n✅ Done! {OUTPUT_FILE} with {len(final_df)} rows.")
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1].upper() == "FETCH":
