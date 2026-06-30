@@ -1,45 +1,43 @@
-name: KuCoin Full Backtest
+name: Raw Indicator Extraction (Backtest)
 
 on:
-  workflow_dispatch:   # you trigger it manually
+  workflow_dispatch:      # allows manual trigger from GitHub UI
+  # schedule:
+  #   - cron: '0 4 * * *'  # optional: run daily at 4 AM UTC
 
 jobs:
-  fetch-and-backtest:
+  extract:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 360   # 6 hours max – adjust as needed
+
     steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
       - name: Install dependencies
-        run: |
-          pip install --upgrade pip
-          pip install ccxt pandas numpy pyarrow requests
+        run: pip install pandas numpy yfinance requests
 
-      - name: Cache KuCoin data (keyed by week – refreshes weekly)
+      - name: Restore Yahoo data cache
         uses: actions/cache@v4
-        id: cache
         with:
-          path: kucoin_data
-          key: kucoin-${{ github.run_week }}
+          path: cache
+          key: yahoo-cache-${{ hashFiles('backtest_ku.py') }}-v1
+          restore-keys: yahoo-cache-
 
-      - name: Fetch historical data (only if cache miss)
-        run: |
-          mkdir -p kucoin_data
-          python backtest_ku.py FETCH
+      - name: Create output directory
+        run: mkdir -p kucoin_data
 
-      - name: Run backtest
-        run: python backtest_ku.py BACKTEST
+      - name: Run raw indicator extraction
+        run: python backtest_ku.py FETCH   # "FETCH" is just a dummy argument
 
-      - name: Upload backtest results
+      - name: Upload raw dataset as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: backtest-output
-          path: |
-            backtest_summary.txt
-            backtest_trades.csv
+          name: raw-indicator-data
+          path: raw_indicator_data_2y.csv
+          retention-days: 90
