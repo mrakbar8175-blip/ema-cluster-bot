@@ -1,14 +1,12 @@
 name: Raw Indicator Extraction (Backtest)
 
 on:
-  workflow_dispatch:      # allows manual trigger from GitHub UI
-  # schedule:
-  #   - cron: '0 4 * * *'  # optional: run daily at 4 AM UTC
+  workflow_dispatch:
 
 jobs:
   extract:
     runs-on: ubuntu-latest
-    timeout-minutes: 360   # 6 hours max – adjust as needed
+    timeout-minutes: 360
 
     steps:
       - name: Checkout repository
@@ -20,20 +18,20 @@ jobs:
           python-version: '3.10'
 
       - name: Install dependencies
-        run: pip install pandas numpy yfinance requests
+        run: pip install pandas numpy requests
 
-      - name: Restore Yahoo data cache
+      - name: Restore KuCoin data cache
         uses: actions/cache@v4
         with:
           path: cache
-          key: yahoo-cache-${{ hashFiles('backtest_ku.py') }}-v1
-          restore-keys: yahoo-cache-
+          key: kucoin-cache-${{ hashFiles('backtest_ku.py') }}-v1
+          restore-keys: kucoin-cache-
 
       - name: Create output directory
         run: mkdir -p kucoin_data
 
       - name: Run raw indicator extraction
-        run: python backtest_ku.py FETCH   # "FETCH" is just a dummy argument
+        run: python backtest_ku.py FETCH
 
       - name: Upload raw dataset as artifact
         uses: actions/upload-artifact@v4
