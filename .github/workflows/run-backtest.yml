@@ -1,0 +1,30 @@
+name: Run Backtester
+
+on:
+  workflow_dispatch:   # manual trigger only
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install pandas numpy yfinance
+
+      - name: Run backtester
+        run: python backtester.py
+
+      - name: Upload backtest results
+        uses: actions/upload-artifact@v4
+        with:
+          name: backtest-results
+          path: |
+            backtest_equity.csv
+            backtest_trades.csv
+            backtest_summary.txt
