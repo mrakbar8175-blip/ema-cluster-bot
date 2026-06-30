@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Combined Data Extractor + Deep Statistical Analyser (FIXED)
+Fetches raw indicator CSV if needed, then prints a condensed statistical report.
 """
 
 import os, sys, time, json
@@ -17,7 +17,7 @@ CACHE_DIR = "cache"
 OUTPUT_CSV = "raw_indicator_data_2y.csv"
 MAX_COINS = 20
 
-# ==================== STEP 1: DATA EXTRACTION ====================
+# ==================== DATA FETCHING (unchanged) ====================
 def extraction_needed():
     if not os.path.exists(OUTPUT_CSV):
         return True
@@ -168,7 +168,6 @@ def compute_indicators(df_4h, df_daily_raw, df_1h, df_btc_4h):
     d['SR_High_20'] = d['High'].rolling(20).max()
     d['SR_Low_20'] = d['Low'].rolling(20).min()
 
-    # Daily context
     if not df_daily_raw.empty:
         daily_ema50 = df_daily_raw['Close'].ewm(span=50, adjust=False).mean()
         daily_ema200 = df_daily_raw['Close'].ewm(span=200, adjust=False).mean()
@@ -183,7 +182,6 @@ def compute_indicators(df_4h, df_daily_raw, df_1h, df_btc_4h):
     d['daily_EMA50'] = daily_ema50_aligned
     d['daily_EMA200'] = daily_ema200_aligned
 
-    # BTC context
     if not df_btc_4h.empty:
         d['BTC_close_4h'] = df_btc_4h['Close'].reindex(d.index, method='ffill')
         d['BTC_EMA50_4h'] = df_btc_4h['Close'].ewm(span=50, adjust=False).mean().reindex(d.index, method='ffill')
@@ -191,7 +189,6 @@ def compute_indicators(df_4h, df_daily_raw, df_1h, df_btc_4h):
         d['BTC_close_4h'] = np.nan
         d['BTC_EMA50_4h'] = np.nan
 
-    # 1H indicators
     if not df_1h.empty:
         delta_1h = df_1h['Close'].diff()
         gain_1h = delta_1h.clip(lower=0)
@@ -216,9 +213,7 @@ def compute_indicators(df_4h, df_daily_raw, df_1h, df_btc_4h):
     return d
 
 def run_extraction():
-    print("="*70)
     print("📦 PHASE 1: DATA EXTRACTION")
-    print("="*70)
     end_date = datetime.now()
     start_date = end_date - timedelta(days=365 * YEARS_BACK)
     print(f"Window: {start_date.date()} → {end_date.date()}")
@@ -230,7 +225,7 @@ def run_extraction():
     btc_4h = btc_1h.resample('4h').agg({'Open':'first','High':'max','Low':'min','Close':'last','Volume':'sum'}).dropna()
 
     coins = build_valid_coin_list()
-    print(f"Coin list: {coins}")
+    print(f"Coin list ({len(coins)}): {coins}")
     all_dfs = []
     for sym in coins:
         print(f"Processing {sym}...")
@@ -249,137 +244,90 @@ def run_extraction():
     final.to_csv(OUTPUT_CSV, index=False)
     print(f"✅ Saved {OUTPUT_CSV} ({len(final)} rows).\n")
 
-# ==================== STEP 2: DEEP ANALYSIS (FIXED) ====================
-def safe_quantile_series(s):
-    """Return summary string for a pandas Series, handling bool/obj safely."""
-    if s.dtype == bool:
-        s = s.astype(int)   # convert to 0/1 for stats
-    if not np.issubdtype(s.dtype, np.number):
-        return f"non-numeric (dtype {s.dtype})"
-    try:
-        q = s.quantile([0.05,0.25,0.5,0.75,0.95])
-        return (f"mean={s.mean():.5f} std={s.std():.5f} skew={s.skew():.3f}\n"
-                f"  5%={q.iloc[0]:.5f} 25%={q.iloc[1]:.5f} 50%={q.iloc[2]:.5f} "
-                f"75%={q.iloc[3]:.5f} 95%={q.iloc[4]:.5f}")
-    except Exception as e:
-        return f"error: {e}"
+# ==================== CONDENSED ANALYSIS ====================
+def condensed_analysis():
+    df = pd.read_csv(OUTPUT_CSV, parse_dates=["timestamp"])
+    print(f"Data: {len(df)} rows, {df['symbol'].nunique()} coins")
+    print(f"Period: {df['timestamp'].min()} → {df['timestamp'].max()}\n")
 
-def deep_analysis():
-    print("="*70)
-    print("📊 PHASE 2: DEEP STATISTICAL ANALYSIS")
-    print("="*70)
-    df = pd.read_csv(OUTPUT_CSV, parse_dates=['timestamp'])
-    print(f"Loaded {len(df)} rows, {df['symbol'].nunique()} coins.")
-    print(f"Columns: {list(df.columns)}")
+    # -- Correlation with forward returns --
+    targets = ["fwd_return_1d", "fwd_return_1w", "fwd_return_2w"]
+    features = [c for c in df.columns if c not in ["timestamp","symbol","Open","High","Low","Close","Volume"]+targets]
 
-    print("\n--- Dataset Summary ---")
-    print(f"Date range: {df['timestamp'].min()} → {df['timestamp'].max()}")
-    print(f"Unique symbols: {df['symbol'].nunique()}")
-
-    # Indicator distributions (safe)
-    indicators = ['RSI_4h','ADX_4h','ATR_4h','MACD_hist','DI_plus','DI_minus',
-                  'Volume_surge','1h_RSI','1h_bullish_momentum','daily_EMA50','daily_EMA200',
-                  'BTC_close_4h','BTC_EMA50_4h']
-    for col in indicators:
-        if col not in df.columns:
-            continue
-        s = df[col].dropna()
-        if len(s) == 0:
-            continue
-        print(f"\n{col} (n={len(s)})")
-        print(safe_quantile_series(s))
-
-    # Correlation with forward returns
-    targets = ['fwd_return_1d','fwd_return_1w','fwd_return_2w']
-    features = [c for c in indicators if c in df.columns]
     for target in targets:
-        if target not in df.columns:
-            continue
-        print(f"\n--- Correlation with {target} ---")
+        if target not in df.columns: continue
+        print(f"=== Correlation with {target} (top 10) ===")
         corrs = {}
         for f in features:
             valid = df[[f, target]].dropna()
-            if len(valid) < 100:
-                continue
+            if len(valid) < 100: continue
             corrs[f] = valid.corr().iloc[0,1]
         for f, r in sorted(corrs.items(), key=lambda x: -abs(x[1]))[:10]:
-            print(f"  {f:30s} r={r:+.4f}")
+            print(f"  {f:30s} {r:+.4f}")
+        print()
 
-    # Regime analysis
-    print("\n--- Regime: BTC above EMA50 ---")
-    if 'BTC_close_4h' in df.columns and 'BTC_EMA50_4h' in df.columns:
-        d = df.dropna(subset=['BTC_close_4h','BTC_EMA50_4h','fwd_return_1w'])
-        above = d[d['BTC_close_4h'] > d['BTC_EMA50_4h']]['fwd_return_1w'].mean()
-        below = d[d['BTC_close_4h'] <= d['BTC_EMA50_4h']]['fwd_return_1w'].mean()
-        print(f"  Above: {above:+.4%}  Below: {below:+.4%}")
+    # -- Regime splits --
+    for regime_name, cond_col, cond_val in [
+        ("BTC above 50EMA", "BTC_close_4h", "BTC_EMA50_4h"),
+        ("Price above 200EMA", "Close", "EMA200_4h"),
+    ]:
+        print(f"=== Regime: {regime_name} ===")
+        if cond_col in df.columns and cond_val in df.columns:
+            d = df.dropna(subset=[cond_col, cond_val, "fwd_return_1w"])
+            mask = d[cond_col] > d[cond_val]
+            print(f"  Above: {d.loc[mask,'fwd_return_1w'].mean():+.4%}  (n={mask.sum()})")
+            print(f"  Below: {d.loc[~mask,'fwd_return_1w'].mean():+.4%}  (n={(~mask).sum()})")
+        print()
 
-    print("\n--- Regime: Price vs EMA200_4h ---")
-    if 'Close' in df.columns and 'EMA200_4h' in df.columns:
-        d = df.dropna(subset=['Close','EMA200_4h','fwd_return_1w'])
-        above = d[d['Close'] > d['EMA200_4h']]['fwd_return_1w'].mean()
-        below = d[d['Close'] <= d['EMA200_4h']]['fwd_return_1w'].mean()
-        print(f"  Above: {above:+.4%}  Below: {below:+.4%}")
-
-    # Threshold sweep (deciles)
-    for col in ['RSI_4h','ADX_4h','MACD_hist','1h_RSI']:
-        if col not in df.columns:
-            continue
-        valid = df[[col, 'fwd_return_1w']].dropna()
-        if len(valid) < 200:
-            continue
-        valid['decile'] = pd.qcut(valid[col], 10, duplicates='drop')
-        avg = valid.groupby('decile')['fwd_return_1w'].mean()
-        print(f"\n{col} deciles → 1w return:")
+    # -- Decile returns --
+    for col in ["RSI_4h","ADX_4h","MACD_hist","1h_RSI"]:
+        if col not in df.columns: continue
+        valid = df[[col, "fwd_return_1w"]].dropna()
+        if len(valid) < 200: continue
+        valid["decile"] = pd.qcut(valid[col], 10, duplicates="drop")
+        avg = valid.groupby("decile")["fwd_return_1w"].mean()
+        print(f"=== {col} deciles → 1w return ===")
         for interval, ret in avg.items():
             print(f"  {str(interval):>20s} {ret:+.4%}")
+        print()
 
-    # Drawdown/survival (max adverse excursion)
-    if 'Low' in df.columns and 'Close' in df.columns:
-        print("\n--- Max Adverse Excursion (next 1w) ---")
-        df2 = df.sort_values(['symbol','timestamp']).copy()
-        df2['future_low'] = df2.groupby('symbol')['Low'].transform(
+    # -- Max Adverse Excursion --
+    print("=== Max Adverse Excursion (next 1w) ===")
+    if "Low" in df.columns and "Close" in df.columns:
+        df2 = df.sort_values(["symbol","timestamp"]).copy()
+        df2["future_low"] = df2.groupby("symbol")["Low"].transform(
             lambda x: x.shift(-42).rolling(42, min_periods=1).min()
         )
-        valid = df2.dropna(subset=['future_low','Close','fwd_return_1w'])
-        valid['mae'] = (valid['Close'] - valid['future_low']) / valid['Close']
-        wins = valid[valid['fwd_return_1w'] > 0]
-        losses = valid[valid['fwd_return_1w'] <= 0]
+        valid = df2.dropna(subset=["future_low","Close","fwd_return_1w"])
+        valid["mae"] = (valid["Close"] - valid["future_low"]) / valid["Close"]
+        wins = valid[valid["fwd_return_1w"] > 0]
+        losses = valid[valid["fwd_return_1w"] <= 0]
         print(f"Total valid: {len(valid)}, wins: {len(wins)}, losses: {len(losses)}")
         for name, sub in [("All", valid), ("Wins", wins), ("Losses", losses)]:
-            if len(sub) == 0:
-                continue
+            if len(sub) == 0: continue
             print(f"\n{name} MAE percentiles:")
             for p in [50, 75, 90, 95]:
-                val = sub['mae'].quantile(p/100)
-                print(f"  {p}%: {val*100:.2f}%")
+                print(f"  {p}%: {sub['mae'].quantile(p/100)*100:.2f}%")
+        print()
 
-    # Best single split
-    print("\n--- Best Single Split (1w return) ---")
-    for col in ['RSI_4h','ADX_4h','MACD_hist']:
-        if col not in df.columns:
-            continue
-        valid = df[[col, 'fwd_return_1w']].dropna()
-        if len(valid) < 500:
-            continue
+    # -- Best single split --
+    print("=== Best Single Split (1w return) ===")
+    for col in ["RSI_4h","ADX_4h","MACD_hist"]:
+        if col not in df.columns: continue
+        valid = df[[col, "fwd_return_1w"]].dropna()
+        if len(valid) < 500: continue
         vals = valid[col].values
-        rets = valid['fwd_return_1w'].values
-        thresholds = np.quantile(vals, np.linspace(0.1, 0.9, 9))
-        best = 0
-        best_t = None
+        rets = valid["fwd_return_1w"].values
+        thresholds = np.quantile(vals, np.linspace(0.1,0.9,9))
+        best, best_t = 0, None
         for t in thresholds:
             mask = vals > t
-            if mask.sum() < 20 or (~mask).sum() < 20:
-                continue
+            if mask.sum()<20 or (~mask).sum()<20: continue
             diff = abs(rets[mask].mean() - rets[~mask].mean())
             if diff > best:
-                best = diff
-                best_t = t
+                best, best_t = diff, t
         if best_t:
-            print(f"{col}: threshold={best_t:.4f}")
-            print(f"  above -> {rets[vals > best_t].mean():+.4%}")
-            print(f"  below -> {rets[vals <= best_t].mean():+.4%}")
-
-    print("\n✅ Analysis complete. Copy this entire output and send to AI quant.\n")
+            print(f"{col}: threshold={best_t:.4f}  above={rets[vals>best_t].mean():+.4%}  below={rets[vals<=best_t].mean():+.4%}")
 
 # ==================== MAIN ====================
 if __name__ == "__main__":
@@ -387,4 +335,4 @@ if __name__ == "__main__":
         run_extraction()
     else:
         print(f"Found existing {OUTPUT_CSV}, skipping extraction.\n")
-    deep_analysis()
+    condensed_analysis()
