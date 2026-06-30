@@ -17,7 +17,7 @@ CACHE_DIR = "cache"
 OUTPUT_CSV = "raw_indicator_data_2y.csv"
 MAX_COINS = 20
 
-# ==================== DATA FETCHING (unchanged) ====================
+# ==================== DATA FETCHING ====================
 def extraction_needed():
     if not os.path.exists(OUTPUT_CSV):
         return True
@@ -250,7 +250,6 @@ def condensed_analysis():
     print(f"Data: {len(df)} rows, {df['symbol'].nunique()} coins")
     print(f"Period: {df['timestamp'].min()} → {df['timestamp'].max()}\n")
 
-    # -- Correlation with forward returns --
     targets = ["fwd_return_1d", "fwd_return_1w", "fwd_return_2w"]
     features = [c for c in df.columns if c not in ["timestamp","symbol","Open","High","Low","Close","Volume"]+targets]
 
@@ -266,7 +265,6 @@ def condensed_analysis():
             print(f"  {f:30s} {r:+.4f}")
         print()
 
-    # -- Regime splits --
     for regime_name, cond_col, cond_val in [
         ("BTC above 50EMA", "BTC_close_4h", "BTC_EMA50_4h"),
         ("Price above 200EMA", "Close", "EMA200_4h"),
@@ -279,7 +277,6 @@ def condensed_analysis():
             print(f"  Below: {d.loc[~mask,'fwd_return_1w'].mean():+.4%}  (n={(~mask).sum()})")
         print()
 
-    # -- Decile returns --
     for col in ["RSI_4h","ADX_4h","MACD_hist","1h_RSI"]:
         if col not in df.columns: continue
         valid = df[[col, "fwd_return_1w"]].dropna()
@@ -291,7 +288,6 @@ def condensed_analysis():
             print(f"  {str(interval):>20s} {ret:+.4%}")
         print()
 
-    # -- Max Adverse Excursion --
     print("=== Max Adverse Excursion (next 1w) ===")
     if "Low" in df.columns and "Close" in df.columns:
         df2 = df.sort_values(["symbol","timestamp"]).copy()
@@ -310,7 +306,6 @@ def condensed_analysis():
                 print(f"  {p}%: {sub['mae'].quantile(p/100)*100:.2f}%")
         print()
 
-    # -- Best single split --
     print("=== Best Single Split (1w return) ===")
     for col in ["RSI_4h","ADX_4h","MACD_hist"]:
         if col not in df.columns: continue
