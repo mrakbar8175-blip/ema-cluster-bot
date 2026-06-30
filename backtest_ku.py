@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
 """
-Combined Data Extractor + Deep Statistical Analyser
-=====================================================
-Step 1: If raw_indicator_data_2y.csv doesn't exist, fetch it.
-Step 2: Run deep statistical analysis and print full report.
+Combined Data Extractor + Deep Statistical Analyser (FIXED)
 """
 
 import os, sys, time, json
@@ -18,18 +15,14 @@ warnings.filterwarnings("ignore")
 YEARS_BACK = 2
 CACHE_DIR = "cache"
 OUTPUT_CSV = "raw_indicator_data_2y.csv"
-MAX_COINS = 20  # limit for memory/API efficiency, you can raise later
+MAX_COINS = 20
 
 # ==================== STEP 1: DATA EXTRACTION ====================
-
 def extraction_needed():
     if not os.path.exists(OUTPUT_CSV):
         return True
-    # Optional: check if file is recent enough (less than 1 day old)
     file_age = time.time() - os.path.getmtime(OUTPUT_CSV)
-    if file_age > 86400:  # older than 24h
-        return True
-    return False
+    return file_age > 86400
 
 def fetch_current_momentum_coins(limit=100, momentum_top=MAX_COINS):
     url = "https://api.coingecko.com/api/v3/coins/markets"
@@ -64,36 +57,28 @@ def fetch_kucoin_usdt_symbols():
         data = resp.json()
         if data.get("code") != "200000":
             return set()
-        symbols = set()
-        for item in data["data"]:
-            if item["quoteCurrency"] == "USDT" and item["enableTrading"]:
-                symbols.add(item["symbol"])
-        return symbols
+        return {item["symbol"] for item in data["data"]
+                if item["quoteCurrency"] == "USDT" and item["enableTrading"]}
     except:
         return set()
 
 def build_valid_coin_list():
     momentum = fetch_current_momentum_coins(limit=100, momentum_top=MAX_COINS)
-    kucoin_symbols = fetch_kucoin_usdt_symbols()
-    valid = []
-    for sym in momentum:
-        pair = f"{sym}-USDT"
-        if pair in kucoin_symbols:
-            valid.append(pair)
+    kucoin = fetch_kucoin_usdt_symbols()
+    valid = [f"{s}-USDT" for s in momentum if f"{s}-USDT" in kucoin]
     if len(valid) < 5:
         fallback = ["BTC-USDT","ETH-USDT","BNB-USDT","SOL-USDT","XRP-USDT",
                     "ADA-USDT","DOGE-USDT","DOT-USDT","MATIC-USDT","LINK-USDT",
                     "AVAX-USDT","SHIB-USDT","UNI-USDT","LTC-USDT","ATOM-USDT",
                     "NEAR-USDT","FIL-USDT","APT-USDT","ARB-USDT","OP-USDT"]
-        valid = [f for f in fallback if f in kucoin_symbols][:MAX_COINS]
+        valid = [f for f in fallback if f in kucoin][:MAX_COINS]
     return valid
 
 def get_kucoin_klines(symbol, interval, start_time, end_time, limit=1000):
     interval_map = {"1h": "1hour", "4h": "4hour", "1d": "1day"}
-    kucoin_interval = interval_map.get(interval, interval)
     url = "https://api.kucoin.com/api/v1/market/candles"
     params = {
-        "type": kucoin_interval,
+        "type": interval_map.get(interval, interval),
         "symbol": symbol,
         "startAt": int(start_time.timestamp()),
         "endAt": int(end_time.timestamp()),
@@ -101,9 +86,7 @@ def get_kucoin_klines(symbol, interval, start_time, end_time, limit=1000):
     try:
         resp = requests.get(url, params=params, timeout=10)
         data = resp.json()
-        if data.get("code") != "200000":
-            return []
-        return data["data"]
+        return data["data"] if data.get("code") == "200000" else []
     except:
         return []
 
@@ -122,14 +105,11 @@ def fetch_ohlcv_kucoin(symbol, interval, start_date, end_date):
             ts = datetime.utcfromtimestamp(int(c[0]))
             all_candles.append({
                 "open_time": ts,
-                "Open": float(c[1]),
-                "Close": float(c[2]),
-                "High": float(c[3]),
-                "Low": float(c[4]),
-                "Volume": float(c[5]),
+                "Open": float(c[1]), "Close": float(c[2]),
+                "High": float(c[3]), "Low": float(c[4]), "Volume": float(c[5])
             })
-        earliest_ts = min(int(c[0]) for c in candles)
-        chunk_end = datetime.utcfromtimestamp(earliest_ts) - timedelta(hours=1)
+        earliest = min(int(c[0]) for c in candles)
+        chunk_end = datetime.utcfromtimestamp(earliest) - timedelta(hours=1)
         time.sleep(0.1)
     if not all_candles:
         return pd.DataFrame()
@@ -159,8 +139,8 @@ def compute_indicators(df_4h, df_daily_raw, df_1h, df_btc_4h):
     d['ATR_4h'] = tr.rolling(14).mean()
 
     delta = d['Close'].diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
     avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
     avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
     rs = avg_gain / avg_loss
@@ -174,10 +154,8 @@ def compute_indicators(df_4h, df_daily_raw, df_1h, df_btc_4h):
     d['MACD_signal'] = macd_signal
     d['MACD_hist'] = macd_line - macd_signal
 
-    dm_plus = h.diff()
-    dm_minus = -l.diff()
-    dm_plus[dm_plus < 0] = 0
-    dm_minus[dm_minus < 0] = 0
+    dm_plus = h.diff().clip(lower=0)
+    dm_minus = -l.diff().clip(lower=0)
     atr_ewm = tr.ewm(alpha=1/14, adjust=False).mean()
     di_plus = 100 * (dm_plus.ewm(alpha=1/14, adjust=False).mean() / atr_ewm)
     di_minus = 100 * (dm_minus.ewm(alpha=1/14, adjust=False).mean() / atr_ewm)
@@ -216,14 +194,15 @@ def compute_indicators(df_4h, df_daily_raw, df_1h, df_btc_4h):
     # 1H indicators
     if not df_1h.empty:
         delta_1h = df_1h['Close'].diff()
-        gain_1h = delta_1h.where(delta_1h > 0, 0.0)
-        loss_1h = -delta_1h.where(delta_1h < 0, 0.0)
+        gain_1h = delta_1h.clip(lower=0)
+        loss_1h = -delta_1h.clip(upper=0)
         avg_gain_1h = gain_1h.ewm(alpha=1/14, adjust=False).mean()
         avg_loss_1h = loss_1h.ewm(alpha=1/14, adjust=False).mean()
         rs_1h = avg_gain_1h / avg_loss_1h
         rsi_1h = 100 - (100 / (1 + rs_1h))
         rsi_1h_aligned = rsi_1h.resample('4h').last().reindex(d.index, method='ffill')
         d['1h_RSI'] = rsi_1h_aligned
+
         df_1h_copy = df_1h.copy()
         df_1h_copy['bull_mom'] = (df_1h_copy['Close'] - df_1h_copy['Open']) / (df_1h_copy['High'] - df_1h_copy['Low'])
         d['1h_bullish_momentum'] = df_1h_copy['bull_mom'].resample('4h').last().reindex(d.index, method='ffill')
@@ -234,7 +213,6 @@ def compute_indicators(df_4h, df_daily_raw, df_1h, df_btc_4h):
     d['fwd_return_1d'] = d['Close'].shift(-6) / d['Close'] - 1
     d['fwd_return_1w'] = d['Close'].shift(-42) / d['Close'] - 1
     d['fwd_return_2w'] = d['Close'].shift(-84) / d['Close'] - 1
-
     return d
 
 def run_extraction():
@@ -245,7 +223,6 @@ def run_extraction():
     start_date = end_date - timedelta(days=365 * YEARS_BACK)
     print(f"Window: {start_date.date()} → {end_date.date()}")
 
-    # BTC
     print("Fetching BTC...")
     btc_1h = cached_fetch("BTC-USDT", "1h", start_date, end_date)
     if btc_1h.empty:
@@ -272,7 +249,21 @@ def run_extraction():
     final.to_csv(OUTPUT_CSV, index=False)
     print(f"✅ Saved {OUTPUT_CSV} ({len(final)} rows).\n")
 
-# ==================== STEP 2: DEEP ANALYSIS ====================
+# ==================== STEP 2: DEEP ANALYSIS (FIXED) ====================
+def safe_quantile_series(s):
+    """Return summary string for a pandas Series, handling bool/obj safely."""
+    if s.dtype == bool:
+        s = s.astype(int)   # convert to 0/1 for stats
+    if not np.issubdtype(s.dtype, np.number):
+        return f"non-numeric (dtype {s.dtype})"
+    try:
+        q = s.quantile([0.05,0.25,0.5,0.75,0.95])
+        return (f"mean={s.mean():.5f} std={s.std():.5f} skew={s.skew():.3f}\n"
+                f"  5%={q.iloc[0]:.5f} 25%={q.iloc[1]:.5f} 50%={q.iloc[2]:.5f} "
+                f"75%={q.iloc[3]:.5f} 95%={q.iloc[4]:.5f}")
+    except Exception as e:
+        return f"error: {e}"
+
 def deep_analysis():
     print("="*70)
     print("📊 PHASE 2: DEEP STATISTICAL ANALYSIS")
@@ -281,34 +272,35 @@ def deep_analysis():
     print(f"Loaded {len(df)} rows, {df['symbol'].nunique()} coins.")
     print(f"Columns: {list(df.columns)}")
 
-    # Basic stats
     print("\n--- Dataset Summary ---")
     print(f"Date range: {df['timestamp'].min()} → {df['timestamp'].max()}")
     print(f"Unique symbols: {df['symbol'].nunique()}")
 
-    # Indicator distributions
+    # Indicator distributions (safe)
     indicators = ['RSI_4h','ADX_4h','ATR_4h','MACD_hist','DI_plus','DI_minus',
                   'Volume_surge','1h_RSI','1h_bullish_momentum','daily_EMA50','daily_EMA200',
                   'BTC_close_4h','BTC_EMA50_4h']
     for col in indicators:
-        if col not in df.columns: continue
+        if col not in df.columns:
+            continue
         s = df[col].dropna()
-        if len(s)==0: continue
-        q = s.quantile([0.05,0.25,0.5,0.75,0.95])
+        if len(s) == 0:
+            continue
         print(f"\n{col} (n={len(s)})")
-        print(f"  mean={s.mean():.5f} std={s.std():.5f} skew={s.skew():.3f}")
-        print(f"  5%={q.iloc[0]:.5f} 25%={q.iloc[1]:.5f} 50%={q.iloc[2]:.5f} 75%={q.iloc[3]:.5f} 95%={q.iloc[4]:.5f}")
+        print(safe_quantile_series(s))
 
     # Correlation with forward returns
     targets = ['fwd_return_1d','fwd_return_1w','fwd_return_2w']
     features = [c for c in indicators if c in df.columns]
     for target in targets:
-        if target not in df.columns: continue
+        if target not in df.columns:
+            continue
         print(f"\n--- Correlation with {target} ---")
         corrs = {}
         for f in features:
-            valid = df[[f,target]].dropna()
-            if len(valid)<100: continue
+            valid = df[[f, target]].dropna()
+            if len(valid) < 100:
+                continue
             corrs[f] = valid.corr().iloc[0,1]
         for f, r in sorted(corrs.items(), key=lambda x: -abs(x[1]))[:10]:
             print(f"  {f:30s} r={r:+.4f}")
@@ -328,11 +320,13 @@ def deep_analysis():
         below = d[d['Close'] <= d['EMA200_4h']]['fwd_return_1w'].mean()
         print(f"  Above: {above:+.4%}  Below: {below:+.4%}")
 
-    # Threshold sweep
+    # Threshold sweep (deciles)
     for col in ['RSI_4h','ADX_4h','MACD_hist','1h_RSI']:
-        if col not in df.columns: continue
-        valid = df[[col,'fwd_return_1w']].dropna()
-        if len(valid)<200: continue
+        if col not in df.columns:
+            continue
+        valid = df[[col, 'fwd_return_1w']].dropna()
+        if len(valid) < 200:
+            continue
         valid['decile'] = pd.qcut(valid[col], 10, duplicates='drop')
         avg = valid.groupby('decile')['fwd_return_1w'].mean()
         print(f"\n{col} deciles → 1w return:")
@@ -343,7 +337,6 @@ def deep_analysis():
     if 'Low' in df.columns and 'Close' in df.columns:
         print("\n--- Max Adverse Excursion (next 1w) ---")
         df2 = df.sort_values(['symbol','timestamp']).copy()
-        # Compute future low over 42 bars
         df2['future_low'] = df2.groupby('symbol')['Low'].transform(
             lambda x: x.shift(-42).rolling(42, min_periods=1).min()
         )
@@ -353,7 +346,8 @@ def deep_analysis():
         losses = valid[valid['fwd_return_1w'] <= 0]
         print(f"Total valid: {len(valid)}, wins: {len(wins)}, losses: {len(losses)}")
         for name, sub in [("All", valid), ("Wins", wins), ("Losses", losses)]:
-            if len(sub) == 0: continue
+            if len(sub) == 0:
+                continue
             print(f"\n{name} MAE percentiles:")
             for p in [50, 75, 90, 95]:
                 val = sub['mae'].quantile(p/100)
@@ -362,25 +356,28 @@ def deep_analysis():
     # Best single split
     print("\n--- Best Single Split (1w return) ---")
     for col in ['RSI_4h','ADX_4h','MACD_hist']:
-        if col not in df.columns: continue
-        valid = df[[col,'fwd_return_1w']].dropna()
-        if len(valid)<500: continue
+        if col not in df.columns:
+            continue
+        valid = df[[col, 'fwd_return_1w']].dropna()
+        if len(valid) < 500:
+            continue
         vals = valid[col].values
         rets = valid['fwd_return_1w'].values
-        thresholds = np.quantile(vals, np.linspace(0.1,0.9,9))
+        thresholds = np.quantile(vals, np.linspace(0.1, 0.9, 9))
         best = 0
         best_t = None
         for t in thresholds:
             mask = vals > t
-            if mask.sum()<20 or (~mask).sum()<20: continue
+            if mask.sum() < 20 or (~mask).sum() < 20:
+                continue
             diff = abs(rets[mask].mean() - rets[~mask].mean())
             if diff > best:
                 best = diff
                 best_t = t
         if best_t:
             print(f"{col}: threshold={best_t:.4f}")
-            print(f"  above -> {rets[vals>best_t].mean():+.4%}")
-            print(f"  below -> {rets[vals<=best_t].mean():+.4%}")
+            print(f"  above -> {rets[vals > best_t].mean():+.4%}")
+            print(f"  below -> {rets[vals <= best_t].mean():+.4%}")
 
     print("\n✅ Analysis complete. Copy this entire output and send to AI quant.\n")
 
