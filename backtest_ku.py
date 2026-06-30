@@ -2,20 +2,24 @@
 """
 Raw Indicator Extractor – 2‑year historical dataset
 Exports every 4H candle with all indicators for liquid momentum coins.
+Designed for GitHub Actions (caching, artifact output).
 """
 
+import sys
+import os
 import pandas as pd
 import numpy as np
 import yfinance as yf
-from datetime import datetime, timedelta
 import requests
-import time, os, warnings
+from datetime import datetime, timedelta
+import time
+import warnings
 warnings.filterwarnings("ignore")
 
 # ========== CONFIG ==========
-START_DATE = "2021-01-01"        # fetch from this date onward
+START_DATE = "2023-01-01"      # you can adjust this (2.5 years from today approx)
 OUTPUT_FILE = "raw_indicator_data_2y.csv"
-CACHE_DIR = "cache"              # local storage to avoid re-downloading
+CACHE_DIR = "cache"
 
 # ========== BLACKLIST ==========
 BLACKLIST = {
@@ -50,9 +54,11 @@ def fetch_current_momentum_coins(limit=100, momentum_top=20):
         return [f"{sym}-USD" for sym in top_symbols]
     except Exception as e:
         print(f"CoinGecko error: {e}. Using fallback list.")
-        fallback = ["BTC-USD","ETH-USD","BNB-USD","SOL-USD","XRP-USD",
-                    "ADA-USD","DOGE-USD","DOT-USD","MATIC-USD","LINK-USD",
-                    "AVAX-USD","SHIB-USD","UNI-USD","LTC-USD","ATOM-USD"]
+        fallback = [
+            "BTC-USD","ETH-USD","BNB-USD","SOL-USD","XRP-USD",
+            "ADA-USD","DOGE-USD","DOT-USD","MATIC-USD","LINK-USD",
+            "AVAX-USD","SHIB-USD","UNI-USD","LTC-USD","ATOM-USD"
+        ]
         return fallback[:momentum_top]
 
 print("🌍 Fetching current momentum universe...")
@@ -66,15 +72,17 @@ def cached_download(symbol, interval, start, end):
     """Download from Yahoo or load from cache."""
     fname = os.path.join(CACHE_DIR, f"{symbol}_{interval}_{start}_{end}.csv")
     if os.path.exists(fname):
+        print(f"   Loading cached {fname}")
         df = pd.read_csv(fname, index_col=0, parse_dates=True)
         return df
+    print(f"   Downloading {symbol} {interval} from {start} to {end}...")
     try:
         df = yf.download(symbol, start=start, end=end, interval=interval, progress=False)
         if not df.empty:
             df.to_csv(fname)
         return df
     except Exception as e:
-        print(f"Error downloading {symbol} {interval}: {e}")
+        print(f"   Download error {symbol} {interval}: {e}")
         return pd.DataFrame()
 
 # ========== INDICATOR COMPUTATION ==========
@@ -134,7 +142,6 @@ def compute_all_indicators(df_4h, df_daily, df_1h, df_btc_4h):
     if not df_daily.empty:
         daily_ema50 = df_daily['Close'].ewm(span=50, adjust=False).mean()
         daily_ema200 = df_daily['Close'].ewm(span=200, adjust=False).mean()
-        # Map daily values to 4H timestamps (forward fill)
         daily_ema50_aligned = daily_ema50.reindex(d.index, method='ffill')
         daily_ema200_aligned = daily_ema200.reindex(d.index, method='ffill')
         d['daily_EMA50'] = daily_ema50_aligned
@@ -166,10 +173,9 @@ def compute_all_indicators(df_4h, df_daily, df_1h, df_btc_4h):
         rsi_1h_aligned = rsi_1h.resample('4h').last().reindex(d.index, method='ffill')
         d['1h_RSI'] = rsi_1h_aligned
 
-        # 1H bullish momentum (of the last 1H candle within the 4H bar)
+        # 1H bullish momentum (last candle within 4H window)
         df_1h_copy = df_1h.copy()
         df_1h_copy['bull_mom'] = (df_1h_copy['Close'] - df_1h_copy['Open']) / (df_1h_copy['High'] - df_1h_copy['Low'])
-        # For each 4H bar, take the bull_mom of the most recent 1H candle
         bull_mom_aligned = df_1h_copy['bull_mom'].resample('4h').last().reindex(d.index, method='ffill')
         d['1h_bullish_momentum'] = bull_mom_aligned
     else:
@@ -177,57 +183,66 @@ def compute_all_indicators(df_4h, df_daily, df_1h, df_btc_4h):
         d['1h_bullish_momentum'] = np.nan
 
     # Future returns for target variables
-    d['fwd_return_1d'] = d['Close'].shift(-6) / d['Close'] - 1   # 6 * 4h = 1 day
-    d['fwd_return_1w'] = d['Close'].shift(-42) / d['Close'] - 1  # 7 days
-    d['fwd_return_2w'] = d['Close'].shift(-84) / d['Close'] - 1  # 14 days
+    d['fwd_return_1d'] = d['Close'].shift(-6) / d['Close'] - 1   # 6 * 4h
+    d['fwd_return_1w'] = d['Close'].shift(-42) / d['Close'] - 1
+    d['fwd_return_2w'] = d['Close'].shift(-84) / d['Close'] - 1
 
     return d
 
 # ========== MAIN EXTRACTION ==========
-end_date = datetime.now().strftime("%Y-%m-%d")
-all_data = []
+def main():
+    end_date = datetime.now().strftime("%Y-%m-%d")
+    all_data = []
 
-print("📦 Downloading BTC 4H data for market context...")
-btc_4h = cached_download("BTC-USD", "1h", START_DATE, end_date)  # we need 4h, but yf 4h not available so use 1h and resample
-btc_4h = btc_4h.resample('4h').agg({
-    'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'
-}).dropna()
+    print("📦 Downloading BTC 4H data for market context...")
+    btc_1h = cached_download("BTC-USD", "1h", START_DATE, end_date)
+    if btc_1h.empty:
+        print("❌ BTC data download failed. Exiting.")
+        sys.exit(1)
+    btc_4h = btc_1h.resample('4h').agg({
+        'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'
+    }).dropna()
 
-for i, sym in enumerate(COINS):
-    print(f"\n⏳ Processing {sym} ({i+1}/{len(COINS)})")
-    try:
-        # Download 1H data for both 4H resampling and 1H indicators
-        df_1h = cached_download(sym, "1h", START_DATE, end_date)
-        if df_1h.empty:
-            print(f"   No data for {sym}, skipping.")
-            continue
+    for i, sym in enumerate(COINS):
+        print(f"\n⏳ Processing {sym} ({i+1}/{len(COINS)})")
+        try:
+            df_1h = cached_download(sym, "1h", START_DATE, end_date)
+            if df_1h.empty:
+                print(f"   No 1H data for {sym}, skipping.")
+                continue
 
-        # Resample to 4H
-        df_4h = df_1h.resample('4h').agg({
-            'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'
-        }).dropna()
+            # Resample to 4H
+            df_4h = df_1h.resample('4h').agg({
+                'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'
+            }).dropna()
 
-        # Daily data
-        df_daily = cached_download(sym, "1d", START_DATE, end_date)
-        if df_daily.empty:
-            print(f"   No daily data for {sym}, skipping.")
-            continue
+            # Daily data
+            df_daily = cached_download(sym, "1d", START_DATE, end_date)
+            if df_daily.empty:
+                print(f"   No daily data for {sym}, skipping.")
+                continue
 
-        # Compute indicators
-        result = compute_all_indicators(df_4h, df_daily, df_1h, btc_4h)
-        result['symbol'] = sym
-        all_data.append(result)
-        print(f"   {len(result)} rows added.")
-        time.sleep(0.5)  # be gentle to Yahoo API
-    except Exception as e:
-        print(f"   Error on {sym}: {e}")
+            # Compute indicators
+            result = compute_all_indicators(df_4h, df_daily, df_1h, btc_4h)
+            result['symbol'] = sym
+            all_data.append(result)
+            print(f"   {len(result)} rows added.")
+            time.sleep(0.5)  # rate limit protection
+        except Exception as e:
+            print(f"   Error on {sym}: {e}")
 
-if not all_data:
-    print("❌ No data collected. Exiting.")
-    exit(1)
+    if not all_data:
+        print("❌ No data collected. Exiting.")
+        sys.exit(1)
 
-final_df = pd.concat(all_data)
-final_df = final_df.reset_index().sort_values(['symbol', 'timestamp'])
-final_df.to_csv(OUTPUT_FILE, index=False)
-print(f"\n✅ Done! File saved to {OUTPUT_FILE} with {len(final_df)} rows.")
-print("   Send this file to your AI quant for Nobel‑worthy model building.")
+    final_df = pd.concat(all_data)
+    final_df = final_df.reset_index().sort_values(['symbol', 'timestamp'])
+    final_df.to_csv(OUTPUT_FILE, index=False)
+    print(f"\n✅ Done! File saved to {OUTPUT_FILE} with {len(final_df)} rows.")
+
+if __name__ == "__main__":
+    # if any arg is given (like "FETCH"), we run extraction; else just exit with a message
+    if len(sys.argv) > 1 and sys.argv[1].upper() == "FETCH":
+        main()
+    else:
+        print("Usage: python backtest_ku.py FETCH")
