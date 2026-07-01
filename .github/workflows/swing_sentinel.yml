@@ -1,11 +1,12 @@
-name: Swing Sentinel Crypto Bot
+name: Swing Sentinel
 
 on:
-  workflow_dispatch:   # Manual trigger only (Actions tab → Run workflow)
+  workflow_dispatch:          # manual trigger
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
