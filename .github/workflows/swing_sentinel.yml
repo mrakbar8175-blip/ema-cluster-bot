@@ -23,3 +23,14 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: python swing_sentinel.py
+
+      - name: Upload bot state (CSV + portfolio)
+        uses: actions/upload-artifact@v4
+        with:
+          name: bot-state
+          path: |
+            portfolio.json
+            trade_log.csv
+            open_trades.csv
+            trade_results.csv
+            perf_counter.txt
