@@ -1,7 +1,7 @@
 name: Swing Sentinel
 
 on:
-  workflow_dispatch:          # manual trigger
+  workflow_dispatch:
 
 jobs:
   run-bot:
@@ -24,7 +24,7 @@ jobs:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: python swing_sentinel.py
 
-      - name: Upload bot state (CSV + portfolio)
+      - name: Upload bot state
         uses: actions/upload-artifact@v4
         with:
           name: bot-state
