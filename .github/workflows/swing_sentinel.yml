@@ -1,4 +1,4 @@
-name: Swing Sentinel
+name: Swing Sentinel Live
 
 on:
   workflow_dispatch:
@@ -9,21 +9,17 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
       - name: Install dependencies
         run: pip install pandas numpy yfinance requests matplotlib mplfinance
-
       - name: Run Swing Sentinel
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: python swing_sentinel.py
-
       - name: Upload bot state
         uses: actions/upload-artifact@v4
         with:
