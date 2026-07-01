@@ -1,11 +1,12 @@
 name: Run Backtester
 
 on:
-  workflow_dispatch:   # manual trigger only
+  workflow_dispatch:
 
 jobs:
   backtest:
     runs-on: ubuntu-latest
+    timeout-minutes: 1440   # 24 hours (max 4320 for public repos)
     steps:
       - uses: actions/checkout@v4
 
