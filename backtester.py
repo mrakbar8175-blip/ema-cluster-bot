@@ -16,7 +16,7 @@ import yfinance as yf
 from datetime import datetime, timedelta
 import math, sys, json, time
 
-# Import bot’s config & logic (will use dummy env vars)
+# Import bot’s config & logic
 from swing_sentinel import (
     CONFIG, score_pair, to_yahoo, get_hybrid_klines,
     ema, atr, rsi, macd, adx, support_resistance_levels,
@@ -35,7 +35,7 @@ BACKTEST_CONFIG = {
         "top_10": 0.02,
         "other": 0.05
     },
-    "run_interval_hours": 4,           # 4h, 8h, 12h… (smaller = more signals)
+    "run_interval_hours": 4,
     "output": {
         "equity_curve": "backtest_equity.csv",
         "trade_log": "backtest_trades.csv",
@@ -83,12 +83,9 @@ class BacktestEngine:
         return filled_price, fee_cost
 
     def get_historical_data(self, sym, interval, days, end_date):
-        """Get data exactly as available up to end_date, with 730-day intraday check."""
         start_date = end_date - timedelta(days=days)
-        # Yahoo intraday data only available for the last 730 days
         max_lookback = end_date - timedelta(days=730)
         if interval in ('1h', '4h') and start_date < max_lookback:
-            # The required start is too old – we can't get this data
             return None
         try:
             df = yf.download(sym, start=start_date, end=end_date,
@@ -102,7 +99,6 @@ class BacktestEngine:
             return None
 
     def score_pair_backtest(self, pair, end_date):
-        """Replicates score_pair but using only data up to end_date."""
         layers = {}
         df_d = self.get_historical_data(pair, '1d', 200, end_date)
         if df_d is None or len(df_d) < 50:
@@ -283,22 +279,31 @@ class BacktestEngine:
             "original_qty": quantity,
             "remaining_qty": quantity,
             "highest_tp": -1,
-            "breakeven": False
+            "breakeven": False,
+            # Also store entry and stop as aliases for get_current_stop
+            "entry": filled_entry,
+            "stop": stop
         }
         return trade
 
     def simulate_trade_life(self, trade, current_date, next_date):
+        # Fix: ensure get_current_stop can access 'entry' and 'stop'
+        trade["entry"] = trade["limit_price"]
+        trade["stop"] = trade["stop_loss"]
+
         sym = trade["symbol"]; direction = trade["action"]
-        entry = trade["limit_price"]; stop_orig = trade["stop_loss"]
+        entry = trade["entry"]; stop_orig = trade["stop"]
         tps = trade["take_profits"]; remaining_qty = trade["remaining_qty"]
         original_qty = trade["original_qty"]; highest_tp_idx = trade["highest_tp"]
         breakeven = trade["breakeven"]; current_stop = get_current_stop(trade)
 
         days_needed = max((next_date - current_date).days + 2, 5)
         df_1h = self.get_historical_data(sym, '1h', days_needed, next_date)
-        if df_1h is None or df_1h.empty: return trade, False
+        if df_1h is None or df_1h.empty:
+            return trade, False
         df_1h = df_1h[df_1h.index >= current_date]
-        if df_1h.empty: return trade, False
+        if df_1h.empty:
+            return trade, False
 
         closed_parts = []; trade_closed = False
         for candle_time, candle in df_1h.iterrows():
@@ -308,20 +313,28 @@ class BacktestEngine:
                 exit_price = current_stop
                 slip, fee_per_unit = self.apply_fee_and_slippage(exit_price, 'sell' if direction=="LONG" else 'buy', sym)
                 filled_exit = slip; fee_cost = fee_per_unit * remaining_qty
-                if direction == "LONG": pnl = (filled_exit - entry) * remaining_qty - fee_cost
-                else: pnl = (entry - filled_exit) * remaining_qty - fee_cost
-                closed_parts.append({"exit_price": filled_exit, "quantity": remaining_qty, "pnl": pnl,
-                                     "hit_level": "STOP LOSS" if highest_tp_idx==-1 else f"STOP after TP{highest_tp_idx+1}"})
+                if direction == "LONG":
+                    pnl = (filled_exit - entry) * remaining_qty - fee_cost
+                else:
+                    pnl = (entry - filled_exit) * remaining_qty - fee_cost
+                closed_parts.append({
+                    "exit_price": filled_exit,
+                    "quantity": remaining_qty,
+                    "pnl": pnl,
+                    "hit_level": "STOP LOSS" if highest_tp_idx==-1 else f"STOP after TP{highest_tp_idx+1}"
+                })
                 remaining_qty = 0; trade_closed = True; break
 
             if direction == "LONG":
                 new_tp_idx = None
                 for i in range(len(tps)-1, -1, -1):
-                    if high >= tps[i] and i > highest_tp_idx: new_tp_idx = i; break
+                    if high >= tps[i] and i > highest_tp_idx:
+                        new_tp_idx = i; break
             else:
                 new_tp_idx = None
                 for i in range(len(tps)-1, -1, -1):
-                    if low <= tps[i] and i > highest_tp_idx: new_tp_idx = i; break
+                    if low <= tps[i] and i > highest_tp_idx:
+                        new_tp_idx = i; break
 
             if new_tp_idx is not None:
                 for i in range(highest_tp_idx+1, new_tp_idx+1):
@@ -334,26 +347,45 @@ class BacktestEngine:
                         filled_exit_tp = slip; fee_cost = fee_per_unit * exit_qty
                         if direction == "LONG": pnl = (filled_exit_tp - entry) * exit_qty - fee_cost
                         else: pnl = (entry - filled_exit_tp) * exit_qty - fee_cost
-                        closed_parts.append({"exit_price": filled_exit_tp, "quantity": exit_qty, "pnl": pnl, "hit_level": f"TP{i+1}"})
+                        closed_parts.append({
+                            "exit_price": filled_exit_tp,
+                            "quantity": exit_qty,
+                            "pnl": pnl,
+                            "hit_level": f"TP{i+1}"
+                        })
                         remaining_qty -= exit_qty; highest_tp_idx = i
                         if i == 0: breakeven = True
-                        trade["highest_tp"] = highest_tp_idx; trade["breakeven"] = breakeven
+                        trade["highest_tp"] = highest_tp_idx
+                        trade["breakeven"] = breakeven
+                        trade["entry"] = trade["entry"]  # ensure it's there
+                        trade["stop"] = trade["stop"]
                         current_stop = get_current_stop(trade)
-                    if remaining_qty <= 0: trade_closed = True; break
+                    if remaining_qty <= 0:
+                        trade_closed = True
+                        break
                 if trade_closed: break
 
         if remaining_qty > 0:
-            trade["remaining_qty"] = remaining_qty; trade["highest_tp"] = highest_tp_idx; trade["breakeven"] = breakeven
+            trade["remaining_qty"] = remaining_qty
+            trade["highest_tp"] = highest_tp_idx
+            trade["breakeven"] = breakeven
             return trade, False
         else:
             total_pnl = sum(cp["pnl"] for cp in closed_parts)
             self.balance += total_pnl
             for cp in closed_parts:
                 self.closed_trades.append({
-                    "open_time": trade["timestamp"], "close_time": candle_time.strftime("%Y-%m-%d %H:%M:%S"),
-                    "symbol": sym, "action": direction, "entry": entry, "stop": stop_orig,
-                    "take_profits": str(tps), "exit_price": cp["exit_price"],
-                    "quantity": cp["quantity"], "pnl": cp["pnl"], "hit_level": cp["hit_level"]
+                    "open_time": trade["timestamp"],
+                    "close_time": candle_time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "symbol": sym,
+                    "action": direction,
+                    "entry": entry,
+                    "stop": stop_orig,
+                    "take_profits": str(tps),
+                    "exit_price": cp["exit_price"],
+                    "quantity": cp["quantity"],
+                    "pnl": cp["pnl"],
+                    "hit_level": cp["hit_level"]
                 })
             return None, True
 
