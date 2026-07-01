@@ -387,20 +387,17 @@ def trend_strength_bonus(adx_value, base_score):
     return 0.0
 
 def score_coin(sym_yahoo, current_price, btc_score, dfs=None):
-    """
-    If dfs is provided (during backtest), it should be a dict with keys '4h', '1h' etc. to avoid redundant API calls.
-    """
     layers = {}
     if dfs:
         tech = get_technicals(sym_yahoo, df=dfs.get('4h'))
         buying = get_buying_pressure(sym_yahoo, df=dfs.get('4h'))
         vol_score = get_volatility_score(sym_yahoo, current_price, df=dfs.get('4h'))
-        vol_trend = volume_trend_score(sym_yahoo, trend_dir=tech.get('trend_dir'), df=dfs.get('4h'))
+        vol_trend = volume_trend_score(sym_yahoo, direction=tech.get('trend_dir'), df=dfs.get('4h'))
     else:
         tech = get_technicals(sym_yahoo)
         buying = get_buying_pressure(sym_yahoo)
         vol_score = get_volatility_score(sym_yahoo, current_price)
-        vol_trend = volume_trend_score(sym_yahoo, trend_dir=tech.get('trend_dir'))
+        vol_trend = volume_trend_score(sym_yahoo, direction=tech.get('trend_dir'))
     if tech.get("error"): return 0, layers, 1.0, 0, "up", [tech["error"]]
     intermarket = btc_score
     total = (CONFIG["scoring"]["weights"]["tech"] * tech["combined"] +
@@ -515,11 +512,15 @@ def generate_signal():
         "atr": atr_val
     }
 
-# ========== STOP MANAGEMENT (live) ==========
+# ========== STOP MANAGEMENT ==========
 def get_current_stop(trade, current_price=None, atr_val=None):
     entry = float(trade["entry"])
     stop_orig = float(trade["stop"])
-    tps = [float(trade[f"TP{i+1}"]) for i in range(5)]
+    # Support both list (backtest) and individual keys (CSV)
+    if "take_profits" in trade and isinstance(trade["take_profits"], list):
+        tps = [float(tp) for tp in trade["take_profits"]]
+    else:
+        tps = [float(trade.get(f"TP{i+1}", 0)) for i in range(5)]
     highest_tp_idx = int(trade.get("highest_tp", -1))
     breakeven = trade.get("breakeven", False)
 
@@ -557,6 +558,7 @@ def check_open_trades():
         original_qty = float(trade.get("original_qty", trade.get("quantity",0)))
         remaining_qty = float(trade.get("quantity", original_qty))
         breakeven = trade.get("breakeven", False)
+        # For CSV, TP columns already exist
         tps = [float(trade[f"TP{i+1}"]) for i in range(5)]
         try: entry_time = datetime.strptime(trade["timestamp"], "%Y-%m-%d %H:%M:%S")
         except: still_open.append(trade); continue
@@ -843,7 +845,6 @@ class BacktestEngine:
                                start_time=start_date, end_time=end_date)
         if not df.empty:
             return df
-        # fallback to Yahoo (but may be limited to 730 days)
         return get_yahoo_klines(sym_yahoo, interval, days=days, start=start_date, end=end_date)
 
     def score_at(self, sym_yahoo, current_price, btc_score, date):
@@ -853,7 +854,7 @@ class BacktestEngine:
         if tech.get("error"): return None
         buying = get_buying_pressure(sym_yahoo, df=df_4h)
         vol_score = get_volatility_score(sym_yahoo, current_price, df=df_4h)
-        vol_trend = volume_trend_score(sym_yahoo, tech['trend_dir'], df=df_4h)
+        vol_trend = volume_trend_score(sym_yahoo, direction=tech['trend_dir'], df=df_4h)
         intermarket = btc_score
         total = (CONFIG["scoring"]["weights"]["tech"] * tech["combined"] +
                  CONFIG["scoring"]["weights"]["buying_pressure"] * buying * 3 +
@@ -899,7 +900,6 @@ class BacktestEngine:
             return None
 
         best["score"] += trend_strength_bonus(best["adx"], best["score"])
-        # momentum alignment skipped in backtest for simplicity (no AI)
         if abs(best["score"]) < CONFIG["trading"]["min_score_to_enter"]: return None
 
         entry = best["price"] * (0.999 if direction=="LONG" else 1.001)
@@ -921,14 +921,18 @@ class BacktestEngine:
             "original_qty": qty, "remaining_qty": qty, "highest_tp": -1, "breakeven": False,
             "entry": filled_entry, "stop": stop
         }
+        # Add individual TP keys for compatibility with get_current_stop
+        for i, tp in enumerate(tps):
+            trade[f"TP{i+1}"] = tp
         return trade
 
     def simulate_trade_life(self, trade, current_date, next_date):
         sym = trade["symbol"]; direction = trade["action"]
         entry = trade["entry"]; stop_orig = trade["stop"]
-        tps = trade["take_profits"]; remaining_qty = trade["remaining_qty"]
-        original_qty = trade["original_qty"]; highest_tp_idx = trade["highest_tp"]
-        breakeven = trade["breakeven"]; current_stop = get_current_stop(trade)
+        tps = trade["take_profits"]
+        remaining_qty = trade["remaining_qty"]; original_qty = trade["original_qty"]
+        highest_tp_idx = trade["highest_tp"]; breakeven = trade["breakeven"]
+        current_stop = get_current_stop(trade)
 
         days_needed = max((next_date - current_date).days + 2, 5)
         df_1h = self.get_historical_klines(sym, '1h', next_date, days=days_needed)
