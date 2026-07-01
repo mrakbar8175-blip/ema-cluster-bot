@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
 Swing Sentinel – Quant‑Grade Crypto Swing Bot (4H)
-5‑layer scoring + hardened infrastructure + KuCoin data + Qwen AI.
-All configuration in the CONFIG dict below.
+5‑layer scoring + KuCoin data + integrated backtester.
+Run live:    python swing_sentinel.py
+Backtest:    python swing_sentinel.py --backtest
 """
 
 import os, json, time, atexit, sys, math, traceback, re
@@ -35,11 +36,17 @@ CONFIG = {
     },
     "universe": {
         "limit": 50,
-        "blacklist": ["QUQ","USDT","USDC","DAI","BUSD","TUSD","USDP","FDUSD","LEO","WBT"]
+        "blacklist": [
+            "QUQ","USDT","USDC","DAI","BUSD","TUSD","USDP","FDUSD",
+            "LEO","WBT","USD1","USDS","USDE","USDG","USDY","PYUSD",
+            "BUIDL","USYC","FIGR_HELOC","LAB","GRAM","CC","RAIN",
+            "ASTER","HTX","WLFI","HYPE"
+        ]
     },
     "ai": {
         "enabled": True,
-        "model": "qwen-2.5-32b",          # Qwen 2.5 32B via Groq (strong reasoning)
+        "model": "llama-3.3-70b-versatile",   # primary model
+        "fallback_model": "qwen-2.5-32b",     # fallback if primary fails
         "temperature": 0.3
     },
     "files": {
@@ -48,6 +55,14 @@ CONFIG = {
         "open_trades": "open_trades.csv",
         "trade_results": "trade_results.csv",
         "perf_counter": "perf_counter.txt"
+    },
+    "backtest": {
+        "start_date": "2024-08-01",           # within KuCoin/Yahoo range
+        "end_date": "today",
+        "initial_balance": 1000.0,
+        "fee_pct": 0.1,
+        "slippage_pct": {"top_10": 0.02, "other": 0.05},
+        "run_interval_hours": 4
     }
 }
 # =======================================================
@@ -76,7 +91,7 @@ def release_lock():
     except: pass
 atexit.register(release_lock)
 
-# ========== COIN LIST ==========
+# ========== DYNAMIC COIN LIST ==========
 def fetch_top_liquid_coins(limit=CONFIG["universe"]["limit"]):
     global COIN_RANK
     url = "https://api.coingecko.com/api/v3/coins/markets"
@@ -87,9 +102,10 @@ def fetch_top_liquid_coins(limit=CONFIG["universe"]["limit"]):
         symbols = []
         COIN_RANK = {}
         rank = 1
+        blacklist = set(CONFIG["universe"]["blacklist"])
         for coin in data:
             sym = coin.get("symbol","").upper()
-            if sym and sym not in set(CONFIG["universe"]["blacklist"]):
+            if sym and sym not in blacklist:
                 ys = f"{sym}-USD"
                 if ys not in symbols:
                     symbols.append(ys)
@@ -133,19 +149,15 @@ def safe_append_csv(filepath, df_new):
             updated = df_new
         updated.to_csv(tmp, index=False)
         os.replace(tmp, filepath)
-    except Exception as e:
-        print(f"CSV write error ({filepath}): {e} – falling back")
-        try:
-            df_new.to_csv(filepath, mode='a', header=not os.path.exists(filepath), index=False)
-        except: pass
+    except:
+        df_new.to_csv(filepath, mode='a', header=not os.path.exists(filepath), index=False)
 
 def safe_save_csv(filepath, df):
     tmp = filepath + ".tmp"
     try:
         df.to_csv(tmp, index=False)
         os.replace(tmp, filepath)
-    except Exception as e:
-        print(f"CSV save error ({filepath}): {e} – using direct write")
+    except:
         df.to_csv(filepath, index=False)
 
 def init_csv(f, cols):
@@ -175,7 +187,7 @@ def add_open_trade(sig):
            "highest_tp": -1, "breakeven": False}
     safe_append_csv(CONFIG["files"]["open_trades"], pd.DataFrame([row]))
 
-# ========== KUCOIN DATA FETCH (with Yahoo fallback) ==========
+# ========== KUCOIN DATA FETCH (primary) ==========
 def get_kucoin_klines(sym_kucoin, interval, limit=100, start_time=None, end_time=None):
     interval_map = {'1h': '1hour', '4h': '4hour', '1d': '1day'}
     kucoin_interval = interval_map.get(interval, interval)
@@ -199,7 +211,6 @@ def get_kucoin_klines(sym_kucoin, interval, limit=100, start_time=None, end_time
         df = df[['Open','High','Low','Close','Volume']]
         return df.tail(limit) if len(df) > limit else df
     except Exception as e:
-        print(f"KuCoin error for {sym_kucoin}: {e}")
         return pd.DataFrame()
 
 def get_yahoo_klines(sym_yahoo, interval, days=14, start=None, end=None):
@@ -219,7 +230,6 @@ def get_yahoo_klines(sym_yahoo, interval, days=14, start=None, end=None):
 def get_hybrid_klines(sym_yahoo, interval, days=14, start=None, end=None):
     cache_key = (sym_yahoo, interval, days, str(start), str(end))
     if cache_key in DATA_CACHE: return DATA_CACHE[cache_key]
-    # Convert to KuCoin symbol
     base = sym_yahoo.replace("-USD","")
     kucoin_sym = f"{base}-USDT"
     df = get_kucoin_klines(kucoin_sym, interval, limit=500 if interval=='1h' else 100,
@@ -227,8 +237,6 @@ def get_hybrid_klines(sym_yahoo, interval, days=14, start=None, end=None):
     if not df.empty:
         DATA_CACHE[cache_key] = df
         return df
-    # Yahoo fallback
-    print(f"KuCoin unavailable for {sym_yahoo}, falling back to Yahoo")
     df = get_yahoo_klines(sym_yahoo, interval, days=days, start=start, end=end)
     if not df.empty:
         DATA_CACHE[cache_key] = df
@@ -254,9 +262,10 @@ def adx(df, period=14):
     adx_val = dx.ewm(alpha=1/period, adjust=False).mean()
     return adx_val.iloc[-1], di_plus.iloc[-1], di_minus.iloc[-1]
 
-# ========== 5‑LAYER SCORING (uses get_hybrid_klines) ==========
-def get_technicals(sym_yahoo):
-    df = get_hybrid_klines(sym_yahoo, '4h', days=14)
+# ========== 5‑LAYER SCORING ==========
+def get_technicals(sym_yahoo, df=None):
+    if df is None:
+        df = get_hybrid_klines(sym_yahoo, '4h', days=14)
     if df.empty or len(df) < 50:
         return {"trend":0, "adx":0, "structure":0, "combined":0, "trend_dir":"up", "ema50_distance":1.0, "adx_value":0, "error":"insufficient 4h data"}
     closes = df['Close']; highs = df['High']; lows = df['Low']
@@ -311,8 +320,9 @@ def get_technicals(sym_yahoo):
     return {"trend": trend, "adx": adx_score, "structure": structure_score, "combined": combined,
             "trend_dir": trend_dir, "ema50_distance": ema50_distance, "adx_value": adx_val, "error": None}
 
-def get_buying_pressure(sym_yahoo):
-    df = get_hybrid_klines(sym_yahoo, '4h', days=10)
+def get_buying_pressure(sym_yahoo, df=None):
+    if df is None:
+        df = get_hybrid_klines(sym_yahoo, '4h', days=10)
     if df.empty or len(df) < 48: return 0.0
     df = df.tail(48)
     buy_vol = df.loc[df['Close'] > df['Open'], 'Volume'].sum()
@@ -321,23 +331,26 @@ def get_buying_pressure(sym_yahoo):
     if total == 0: return 0.0
     return (buy_vol - sell_vol) / total
 
-def get_volatility_score(sym_yahoo, current_price):
-    df = get_hybrid_klines(sym_yahoo, '4h', days=14)
+def get_volatility_score(sym_yahoo, current_price, df=None):
+    if df is None:
+        df = get_hybrid_klines(sym_yahoo, '4h', days=14)
     if df.empty or len(df) < 14: return -1
     a = atr(df)
     if a is None: return -1
     pct = a / current_price * 100
     return 1 if 2 <= pct <= 7 else -1
 
-def btc_trend_score():
-    df = get_hybrid_klines("BTC-USD", '4h', days=14)
+def btc_trend_score(df=None):
+    if df is None:
+        df = get_hybrid_klines("BTC-USD", '4h', days=14)
     if df.empty or len(df) < 50: return 0
     ema50 = ema(df['Close'], 50)
     current = df['Close'].iloc[-1]
     return 2 if current > ema50.iloc[-1] else -2
 
-def volume_trend_score(sym_yahoo, direction=None):
-    df = get_hybrid_klines(sym_yahoo, '4h', days=5)
+def volume_trend_score(sym_yahoo, direction=None, df=None):
+    if df is None:
+        df = get_hybrid_klines(sym_yahoo, '4h', days=5)
     if df.empty or len(df) < 12: return 0
     recent = df['Volume'].tail(6)
     first = recent[:3].mean(); second = recent[3:].mean()
@@ -347,8 +360,9 @@ def volume_trend_score(sym_yahoo, direction=None):
         return -2 if direction == "up" else -2
     return 0
 
-def momentum_alignment_score(sym_yahoo, direction, layers):
-    df = get_hybrid_klines(sym_yahoo, '4h', days=2)
+def momentum_alignment_score(sym_yahoo, direction, layers, df=None):
+    if df is None:
+        df = get_hybrid_klines(sym_yahoo, '4h', days=2)
     if df.empty or len(df) < 2: return 0.0
     last = df.iloc[-1]
     candle_ok = (direction=="LONG" and last['Close']>last['Open']) or (direction=="SHORT" and last['Close']<last['Open'])
@@ -372,40 +386,39 @@ def trend_strength_bonus(adx_value, base_score):
         return 0.20 if base_score > 0 else -0.20
     return 0.0
 
-def score_coin(sym_yahoo, current_price, btc_score):
+def score_coin(sym_yahoo, current_price, btc_score, dfs=None):
+    """
+    If dfs is provided (during backtest), it should be a dict with keys '4h', '1h' etc. to avoid redundant API calls.
+    """
     layers = {}
-    tech = get_technicals(sym_yahoo)
+    if dfs:
+        tech = get_technicals(sym_yahoo, df=dfs.get('4h'))
+        buying = get_buying_pressure(sym_yahoo, df=dfs.get('4h'))
+        vol_score = get_volatility_score(sym_yahoo, current_price, df=dfs.get('4h'))
+        vol_trend = volume_trend_score(sym_yahoo, trend_dir=tech.get('trend_dir'), df=dfs.get('4h'))
+    else:
+        tech = get_technicals(sym_yahoo)
+        buying = get_buying_pressure(sym_yahoo)
+        vol_score = get_volatility_score(sym_yahoo, current_price)
+        vol_trend = volume_trend_score(sym_yahoo, trend_dir=tech.get('trend_dir'))
     if tech.get("error"): return 0, layers, 1.0, 0, "up", [tech["error"]]
-    combined = tech["combined"]
-    adx_val = tech["adx_value"]
-    trend_dir = tech["trend_dir"]
-    buying = get_buying_pressure(sym_yahoo)
-    vol_score = get_volatility_score(sym_yahoo, current_price)
     intermarket = btc_score
-    vol_trend = volume_trend_score(sym_yahoo, trend_dir)
-
-    total = (CONFIG["scoring"]["weights"]["tech"] * combined +
+    total = (CONFIG["scoring"]["weights"]["tech"] * tech["combined"] +
              CONFIG["scoring"]["weights"]["buying_pressure"] * buying * 3 +
              CONFIG["scoring"]["weights"]["volatility"] * vol_score +
              CONFIG["scoring"]["weights"]["intermarket"] * intermarket +
              CONFIG["scoring"]["weights"]["volume_trend"] * vol_trend)
     total = max(-3, min(3, total))
-    layers = {"tech": combined, "buying_press": buying*3, "volatility": vol_score,
+    layers = {"tech": tech["combined"], "buying_press": buying*3, "volatility": vol_score,
               "intermarket": intermarket, "volume_trend": vol_trend}
-    return total, layers, tech["ema50_distance"], adx_val, trend_dir, []
+    return total, layers, tech["ema50_distance"], tech["adx_value"], tech["trend_dir"], []
 
-# ========== AI REASONING (Qwen 2.5 32B) ==========
-def ai_reasoning(sym, entry, atr_val, layers, errors):
-    if not AI_ENABLED: return 6, "AI disabled"
-    layer_str = "; ".join(f"{k}={v:.2f}" for k,v in layers.items())
-    prompt = (f"Crypto trade signal for {sym} at {entry:.5f}. 4h ATR: {atr_val:.4f}. "
-              f"Layer scores: {layer_str}. "
-              f"Provide a concise, analytical reasoning (1-2 sentences) and a confidence score 4-7. "
-              f"Format: CONFIDENCE: 6 | REASONING: ...")
+# ========== AI REASONING (with fallback) ==========
+def call_ai(model, prompt):
     try:
         resp = requests.post("https://api.groq.com/openai/v1/chat/completions",
             headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
-            json={"model": CONFIG["ai"]["model"], "messages": [{"role":"user","content":prompt}],
+            json={"model": model, "messages": [{"role":"user","content":prompt}],
                   "temperature":CONFIG["ai"]["temperature"], "max_tokens":150}, timeout=20)
         if resp.status_code == 200:
             text = resp.json()["choices"][0]["message"]["content"]
@@ -416,9 +429,27 @@ def ai_reasoning(sym, entry, atr_val, layers, errors):
             reason = reason_match.group(1).strip() if reason_match else "Automated signal."
             return conf, reason
     except: pass
-    return 6, "AI unavailable."
+    return None, None
 
-# ========== SIGNAL GENERATION ==========
+def ai_reasoning(sym, entry, atr_val, layers, errors):
+    if not AI_ENABLED: return 6, "AI disabled"
+    layer_str = "; ".join(f"{k}={v:.2f}" for k,v in layers.items())
+    prompt = (f"Crypto trade signal for {sym} at {entry:.5f}. 4h ATR: {atr_val:.4f}. "
+              f"Layer scores: {layer_str}. "
+              f"Provide concise reasoning (1-2 sentences) and a confidence 4-7. "
+              f"Format: CONFIDENCE: 6 | REASONING: ...")
+    # try primary model
+    conf, reason = call_ai(CONFIG["ai"]["model"], prompt)
+    if conf is not None:
+        return conf, reason
+    # try fallback
+    conf, reason = call_ai(CONFIG["ai"].get("fallback_model", ""), prompt)
+    if conf is not None:
+        return conf, reason
+    # ultimate fallback
+    return 6, "AI unavailable, using default confidence"
+
+# ========== SIGNAL GENERATION (live) ==========
 def generate_signal():
     open_risky = set()
     try:
@@ -435,7 +466,6 @@ def generate_signal():
     candidates = []
     for yahoo_sym in CRYPTO_PAIRS:
         if yahoo_sym in open_risky: continue
-        # Use 1h data to get current price
         price_df = get_hybrid_klines(yahoo_sym, '1h', days=1)
         if price_df.empty: continue
         price = price_df['Close'].iloc[-1]
@@ -444,10 +474,8 @@ def generate_signal():
         if atr_val/price > 0.07: score = 0.0
         candidates.append({"symbol": yahoo_sym, "price": price, "score": score, "layers": layers,
                            "adx": adx_val, "trend_dir": trend_dir, "atr": atr_val, "errors": errors})
-
     if not candidates:
         return {"action": "HOLD", "reasoning": "No valid candidates."}
-
     best = max(candidates, key=lambda x: abs(x["score"]))
     if abs(best["score"]) < CONFIG["trading"]["min_score_to_enter"]:
         return {"action": "HOLD", "reasoning": f"No strong conviction. Best: {best['symbol']} ({best['score']:.2f})"}
@@ -487,7 +515,7 @@ def generate_signal():
         "atr": atr_val
     }
 
-# ========== STOP MANAGEMENT ==========
+# ========== STOP MANAGEMENT (live) ==========
 def get_current_stop(trade, current_price=None, atr_val=None):
     entry = float(trade["entry"])
     stop_orig = float(trade["stop"])
@@ -513,7 +541,7 @@ def get_current_stop(trade, current_price=None, atr_val=None):
             return min(trail_stop, tps[1])
     return stop_orig
 
-# ========== TRADE MANAGEMENT ==========
+# ========== LIVE TRADE MANAGEMENT ==========
 def check_open_trades():
     try: open_df = pd.read_csv(CONFIG["files"]["open_trades"])
     except: return
@@ -748,8 +776,8 @@ def daily_pnl():
         return daily['pnl'].sum() if not daily.empty else 0.0
     except: return 0.0
 
-# ========== MAIN ==========
-def main():
+# ========== LIVE MAIN ==========
+def live_main():
     acquire_lock()
     initialize_files()
     check_open_trades()
@@ -777,5 +805,241 @@ def main():
         send_discord(f"HOLD – {sig['reasoning']}")
     release_lock()
 
+# ========== BACKTEST ENGINE ==========
+class BacktestEngine:
+    def __init__(self, coins):
+        self.coins = coins
+        self.start = datetime.strptime(CONFIG["backtest"]["start_date"], "%Y-%m-%d")
+        end_str = CONFIG["backtest"]["end_date"]
+        self.end = datetime.now() if end_str.lower() == "today" else datetime.strptime(end_str, "%Y-%m-%d")
+        self.balance = CONFIG["backtest"]["initial_balance"]
+        self.initial_balance = self.balance
+        self.open_trades = []
+        self.closed_trades = []
+        self.equity_curve = []
+        self.fee = CONFIG["backtest"]["fee_pct"] / 100.0
+        self.slippage = CONFIG["backtest"]["slippage_pct"]
+        self.interval_hours = CONFIG["backtest"]["run_interval_hours"]
+        self.dates = pd.date_range(self.start, self.end, freq=f'{self.interval_hours}h')
+
+    def get_coin_rank(self, sym):
+        return COIN_RANK.get(sym, 99)
+
+    def get_slippage(self, sym):
+        rank = self.get_coin_rank(sym)
+        return (self.slippage["top_10"] if rank <= 10 else self.slippage["other"]) / 100.0
+
+    def apply_fee_and_slippage(self, price, side, sym):
+        slip = self.get_slippage(sym)
+        filled_price = price * (1 + slip) if side == 'buy' else price * (1 - slip)
+        fee_cost = filled_price * self.fee
+        return filled_price, fee_cost
+
+    def get_historical_klines(self, sym_yahoo, interval, end_date, days=14):
+        base = sym_yahoo.replace("-USD","")
+        kucoin_sym = f"{base}-USDT"
+        start_date = end_date - timedelta(days=days)
+        df = get_kucoin_klines(kucoin_sym, interval, limit=500 if interval=='1h' else 100,
+                               start_time=start_date, end_time=end_date)
+        if not df.empty:
+            return df
+        # fallback to Yahoo (but may be limited to 730 days)
+        return get_yahoo_klines(sym_yahoo, interval, days=days, start=start_date, end=end_date)
+
+    def score_at(self, sym_yahoo, current_price, btc_score, date):
+        df_4h = self.get_historical_klines(sym_yahoo, '4h', date, days=14)
+        if df_4h.empty: return None
+        tech = get_technicals(sym_yahoo, df=df_4h)
+        if tech.get("error"): return None
+        buying = get_buying_pressure(sym_yahoo, df=df_4h)
+        vol_score = get_volatility_score(sym_yahoo, current_price, df=df_4h)
+        vol_trend = volume_trend_score(sym_yahoo, tech['trend_dir'], df=df_4h)
+        intermarket = btc_score
+        total = (CONFIG["scoring"]["weights"]["tech"] * tech["combined"] +
+                 CONFIG["scoring"]["weights"]["buying_pressure"] * buying * 3 +
+                 CONFIG["scoring"]["weights"]["volatility"] * vol_score +
+                 CONFIG["scoring"]["weights"]["intermarket"] * intermarket +
+                 CONFIG["scoring"]["weights"]["volume_trend"] * vol_trend)
+        total = max(-3, min(3, total))
+        layers = {"tech": tech["combined"], "buying_press": buying*3, "volatility": vol_score,
+                  "intermarket": intermarket, "volume_trend": vol_trend}
+        return {"score": total, "layers": layers, "adx": tech["adx_value"], "trend_dir": tech["trend_dir"],
+                "atr": atr(df_4h) or current_price*0.02, "errors": []}
+
+    def generate_signal_at(self, date):
+        open_risky = set()
+        for t in self.open_trades:
+            if not t.get("breakeven", False):
+                open_risky.add(t["symbol"])
+        if len(open_risky) >= CONFIG["trading"]["max_risky_trades"]:
+            return None
+
+        btc_df = self.get_historical_klines("BTC-USD", '4h', date, days=14)
+        btc_score = btc_trend_score(df=btc_df) if not btc_df.empty else 0
+
+        candidates = []
+        for yahoo_sym in self.coins:
+            if yahoo_sym in open_risky: continue
+            price_df = self.get_historical_klines(yahoo_sym, '1h', date, days=1)
+            if price_df.empty: continue
+            price = price_df['Close'].iloc[-1]
+            res = self.score_at(yahoo_sym, price, btc_score, date)
+            if res is None: continue
+            atr_val = res['atr']
+            if atr_val/price > 0.07: res['score'] = 0.0
+            candidates.append({"symbol": yahoo_sym, "price": price, "score": res['score'],
+                               "layers": res['layers'], "adx": res['adx'], "trend_dir": res['trend_dir'],
+                               "atr": atr_val, "errors": res['errors']})
+        if not candidates: return None
+        best = max(candidates, key=lambda x: abs(x["score"]))
+        if abs(best["score"]) < CONFIG["trading"]["min_score_to_enter"]: return None
+
+        direction = "LONG" if best["score"] > 0 else "SHORT"
+        if (direction == "LONG" and best["trend_dir"] == "down") or (direction == "SHORT" and best["trend_dir"] == "up"):
+            return None
+
+        best["score"] += trend_strength_bonus(best["adx"], best["score"])
+        # momentum alignment skipped in backtest for simplicity (no AI)
+        if abs(best["score"]) < CONFIG["trading"]["min_score_to_enter"]: return None
+
+        entry = best["price"] * (0.999 if direction=="LONG" else 1.001)
+        atr_val = best["atr"]
+        stop_distance = max(2.5 * atr_val, best["price"] * 0.01)
+        stop = entry - stop_distance if direction=="LONG" else entry + stop_distance
+        risk = abs(entry - stop)
+        qty = round((self.balance * CONFIG["trading"]["risk_per_trade_pct"] / 100) / risk, 6)
+        tps = [round(entry + m*risk if direction=="LONG" else entry - m*risk, 6) for m in CONFIG["trading"]["tp_multipliers"]]
+
+        filled_entry, fee_per_unit = self.apply_fee_and_slippage(entry, 'buy' if direction=="LONG" else 'sell', best["symbol"])
+        entry_fee = fee_per_unit * qty
+        self.balance -= entry_fee
+
+        trade = {
+            "action": direction, "symbol": best["symbol"], "quantity": qty,
+            "limit_price": filled_entry, "stop_loss": stop, "take_profits": tps,
+            "score": best["score"], "atr": atr_val, "timestamp": date.strftime("%Y-%m-%d %H:%M:%S"),
+            "original_qty": qty, "remaining_qty": qty, "highest_tp": -1, "breakeven": False,
+            "entry": filled_entry, "stop": stop
+        }
+        return trade
+
+    def simulate_trade_life(self, trade, current_date, next_date):
+        sym = trade["symbol"]; direction = trade["action"]
+        entry = trade["entry"]; stop_orig = trade["stop"]
+        tps = trade["take_profits"]; remaining_qty = trade["remaining_qty"]
+        original_qty = trade["original_qty"]; highest_tp_idx = trade["highest_tp"]
+        breakeven = trade["breakeven"]; current_stop = get_current_stop(trade)
+
+        days_needed = max((next_date - current_date).days + 2, 5)
+        df_1h = self.get_historical_klines(sym, '1h', next_date, days=days_needed)
+        if df_1h.empty: return trade, False
+        df_1h = df_1h[df_1h.index >= current_date]
+        if df_1h.empty: return trade, False
+
+        closed_parts = []; trade_closed = False
+        atr_val_trade = trade.get("atr", 0) or (atr(df_1h) or 0)
+
+        for candle_time, candle in df_1h.iterrows():
+            high = candle['High']; low = candle['Low']
+            sl_hit = (direction == "LONG" and low <= current_stop) or (direction == "SHORT" and high >= current_stop)
+            if sl_hit:
+                exit_price = current_stop
+                slip, fee_per_unit = self.apply_fee_and_slippage(exit_price, 'sell' if direction=="LONG" else 'buy', sym)
+                filled_exit = slip; fee_cost = fee_per_unit * remaining_qty
+                pnl = (filled_exit - entry) * remaining_qty if direction=="LONG" else (entry - filled_exit) * remaining_qty
+                pnl -= fee_cost
+                closed_parts.append({"exit_price": filled_exit, "quantity": remaining_qty, "pnl": pnl,
+                                     "hit_level": "STOP LOSS" if highest_tp_idx==-1 else f"STOP after TP{highest_tp_idx+1}"})
+                remaining_qty = 0; trade_closed = True; break
+
+            if direction == "LONG":
+                new_tp_idx = None
+                for i in range(len(tps)-1, -1, -1):
+                    if high >= tps[i] and i > highest_tp_idx: new_tp_idx = i; break
+            else:
+                new_tp_idx = None
+                for i in range(len(tps)-1, -1, -1):
+                    if low <= tps[i] and i > highest_tp_idx: new_tp_idx = i; break
+            if new_tp_idx is not None:
+                for i in range(highest_tp_idx+1, new_tp_idx+1):
+                    if remaining_qty <= 0: break
+                    fraction = CONFIG["trading"]["fractions"][i]; exit_qty = original_qty * fraction
+                    if exit_qty > remaining_qty: exit_qty = remaining_qty
+                    if exit_qty > 0:
+                        exit_price_tp = tps[i]
+                        slip, fee_per_unit = self.apply_fee_and_slippage(exit_price_tp, 'sell' if direction=="LONG" else 'buy', sym)
+                        filled_exit_tp = slip; fee_cost = fee_per_unit * exit_qty
+                        pnl = (filled_exit_tp - entry) * exit_qty if direction=="LONG" else (entry - filled_exit_tp) * exit_qty
+                        pnl -= fee_cost
+                        closed_parts.append({"exit_price": filled_exit_tp, "quantity": exit_qty, "pnl": pnl, "hit_level": f"TP{i+1}"})
+                        remaining_qty -= exit_qty
+                        highest_tp_idx = i
+                        if i == 0: breakeven = True
+                        trade["highest_tp"] = highest_tp_idx; trade["breakeven"] = breakeven
+                        current_stop = get_current_stop(trade, current_price=high if direction=="LONG" else low, atr_val=atr_val_trade)
+                    if remaining_qty <= 0: trade_closed = True; break
+                if trade_closed: break
+
+        if remaining_qty > 0 and not trade_closed:
+            trade["remaining_qty"] = remaining_qty; trade["highest_tp"] = highest_tp_idx; trade["breakeven"] = breakeven
+            return trade, False
+        else:
+            total_pnl = sum(p["pnl"] for p in closed_parts)
+            self.balance += total_pnl
+            for cp in closed_parts:
+                self.closed_trades.append({
+                    "open_time": trade["timestamp"], "close_time": candle_time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "symbol": sym, "action": direction, "entry": entry, "stop": stop_orig,
+                    "take_profits": str(tps), "exit_price": cp["exit_price"],
+                    "quantity": cp["quantity"], "pnl": cp["pnl"], "hit_level": cp["hit_level"]
+                })
+            return None, True
+
+    def run(self):
+        print(f"Backtesting {len(self.coins)} coins from {self.start.date()} to {self.end.date()}...")
+        for i, current_date in enumerate(self.dates):
+            next_date = self.dates[i+1] if i+1 < len(self.dates) else current_date + timedelta(hours=self.interval_hours)
+            new_open = []
+            for trade in self.open_trades:
+                updated_trade, closed = self.simulate_trade_life(trade, current_date, next_date)
+                if not closed: new_open.append(updated_trade)
+            self.open_trades = new_open
+            self.equity_curve.append((current_date, self.balance))
+            signal = self.generate_signal_at(current_date)
+            if signal is not None:
+                self.open_trades.append(signal)
+        self.save_results()
+
+    def save_results(self):
+        eq_df = pd.DataFrame(self.equity_curve, columns=["date", "balance"])
+        eq_df.to_csv("backtest_equity.csv", index=False)
+        if self.closed_trades:
+            pd.DataFrame(self.closed_trades).to_csv("backtest_trades.csv", index=False)
+        total_return = (self.balance - self.initial_balance) / self.initial_balance * 100
+        sharpe = None
+        if len(eq_df) > 1:
+            returns = eq_df["balance"].pct_change().dropna()
+            if returns.std() != 0:
+                sharpe = (returns.mean() / returns.std()) * np.sqrt(365*24/self.interval_hours)
+        summary = f"""Backtest completed!
+Period: {self.start.date()} to {self.end.date()}
+Initial balance: ${self.initial_balance:.2f}
+Final balance:   ${self.balance:.2f}
+Total return: {total_return:.2f}%
+Sharpe ratio: {sharpe:.2f} (approx)
+Number of closed trades: {len(self.closed_trades)}
+"""
+        with open("backtest_summary.txt", "w") as f:
+            f.write(summary)
+        print(summary)
+
+def backtest_main():
+    bt = BacktestEngine(CRYPTO_PAIRS)
+    bt.run()
+
+# ========== ENTRY POINT ==========
 if __name__ == "__main__":
-    main()
+    if "--backtest" in sys.argv:
+        backtest_main()
+    else:
+        live_main()
