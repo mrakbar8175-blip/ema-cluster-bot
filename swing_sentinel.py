@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Swing Sentinel – Quant‑Grade Crypto Swing Bot (4H)
-5‑layer scoring + hardened infrastructure + charts + alerts.
+5‑layer scoring + hardened infrastructure + KuCoin data + Qwen AI.
 All configuration in the CONFIG dict below.
 """
 
@@ -16,13 +16,13 @@ from datetime import datetime, timedelta
 CONFIG = {
     "trading": {
         "max_risky_trades": 5,
-        "risk_per_trade_pct": 1.0,          # % of balance per trade
-        "min_score_to_enter": 1.49,         # absolute conviction threshold
-        "atr_stop_multiplier": 2.5,         # initial stop width
-        "trailing_atr_multiplier": 2.0,     # trailing stop after TP3
+        "risk_per_trade_pct": 1.0,
+        "min_score_to_enter": 1.49,
+        "atr_stop_multiplier": 2.5,
+        "trailing_atr_multiplier": 2.0,
         "tp_multipliers": [0.4, 0.8, 1.2, 1.6, 2.0],
         "fractions": [0.30, 0.10, 0.10, 0.10, 0.40],
-        "daily_loss_limit": -100            # USDT
+        "daily_loss_limit": -100
     },
     "scoring": {
         "weights": {
@@ -39,7 +39,7 @@ CONFIG = {
     },
     "ai": {
         "enabled": True,
-        "model": "llama-3.3-70b-versatile",
+        "model": "qwen-2.5-32b",          # Qwen 2.5 32B via Groq (strong reasoning)
         "temperature": 0.3
     },
     "files": {
@@ -52,7 +52,6 @@ CONFIG = {
 }
 # =======================================================
 
-# Environment
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 AI_ENABLED = CONFIG["ai"]["enabled"] and GROQ_API_KEY is not None
@@ -61,7 +60,7 @@ LOCK_FILE = "bot.lock"
 DATA_CACHE = {}
 COIN_RANK = {}
 
-# ========== INSTANCE LOCK (prevents CSV corruption) ==========
+# ========== INSTANCE LOCK ==========
 def acquire_lock():
     if os.path.exists(LOCK_FILE):
         try:
@@ -77,7 +76,7 @@ def release_lock():
     except: pass
 atexit.register(release_lock)
 
-# ========== DYNAMIC COIN LIST ==========
+# ========== COIN LIST ==========
 def fetch_top_liquid_coins(limit=CONFIG["universe"]["limit"]):
     global COIN_RANK
     url = "https://api.coingecko.com/api/v3/coins/markets"
@@ -106,7 +105,7 @@ def fetch_top_liquid_coins(limit=CONFIG["universe"]["limit"]):
 
 CRYPTO_PAIRS = fetch_top_liquid_coins()
 
-# ========== PORTFOLIO (persistent) ==========
+# ========== PORTFOLIO ==========
 def load_portfolio():
     pf = CONFIG["files"]["portfolio_file"]
     if os.path.exists(pf):
@@ -123,9 +122,8 @@ def save_portfolio(p):
 
 portfolio = load_portfolio()
 
-# ========== CSV HELPERS (safe append) ==========
+# ========== SAFE CSV ==========
 def safe_append_csv(filepath, df_new):
-    """Thread/process-safe CSV append using a temporary file to avoid corruption."""
     tmp = filepath + ".tmp"
     try:
         if os.path.exists(filepath):
@@ -134,13 +132,12 @@ def safe_append_csv(filepath, df_new):
         else:
             updated = df_new
         updated.to_csv(tmp, index=False)
-        os.replace(tmp, filepath)  # atomic on Unix
+        os.replace(tmp, filepath)
     except Exception as e:
-        print(f"CSV write error ({filepath}): {e} – falling back to direct write")
+        print(f"CSV write error ({filepath}): {e} – falling back")
         try:
             df_new.to_csv(filepath, mode='a', header=not os.path.exists(filepath), index=False)
-        except:
-            pass
+        except: pass
 
 def safe_save_csv(filepath, df):
     tmp = filepath + ".tmp"
@@ -178,7 +175,33 @@ def add_open_trade(sig):
            "highest_tp": -1, "breakeven": False}
     safe_append_csv(CONFIG["files"]["open_trades"], pd.DataFrame([row]))
 
-# ========== DATA FETCH ==========
+# ========== KUCOIN DATA FETCH (with Yahoo fallback) ==========
+def get_kucoin_klines(sym_kucoin, interval, limit=100, start_time=None, end_time=None):
+    interval_map = {'1h': '1hour', '4h': '4hour', '1d': '1day'}
+    kucoin_interval = interval_map.get(interval, interval)
+    url = "https://api.kucoin.com/api/v1/market/candles"
+    params = {"type": kucoin_interval, "symbol": sym_kucoin}
+    if start_time: params["startAt"] = int(start_time.timestamp())
+    if end_time: params["endAt"] = int(end_time.timestamp())
+    try:
+        time.sleep(0.2)
+        resp = requests.get(url, params=params, timeout=10)
+        data = resp.json()
+        if data.get("code") != "200000": return pd.DataFrame()
+        candles = data["data"]
+        if not candles: return pd.DataFrame()
+        rows = []
+        for c in candles:
+            ts = datetime.utcfromtimestamp(int(c[0]))
+            rows.append({'open_time': ts, 'Open': float(c[1]), 'Close': float(c[2]),
+                         'High': float(c[3]), 'Low': float(c[4]), 'Volume': float(c[5])})
+        df = pd.DataFrame(rows).set_index('open_time').sort_index()
+        df = df[['Open','High','Low','Close','Volume']]
+        return df.tail(limit) if len(df) > limit else df
+    except Exception as e:
+        print(f"KuCoin error for {sym_kucoin}: {e}")
+        return pd.DataFrame()
+
 def get_yahoo_klines(sym_yahoo, interval, days=14, start=None, end=None):
     if start is None:
         end = datetime.now()
@@ -186,12 +209,31 @@ def get_yahoo_klines(sym_yahoo, interval, days=14, start=None, end=None):
     else:
         end = end if end else datetime.now()
     try:
-        time.sleep(0.2)  # rate limit
+        time.sleep(0.2)
         df = yf.download(sym_yahoo, start=start, end=end, interval=interval, progress=False)
         if df.empty: return pd.DataFrame()
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
         return df
     except: return pd.DataFrame()
+
+def get_hybrid_klines(sym_yahoo, interval, days=14, start=None, end=None):
+    cache_key = (sym_yahoo, interval, days, str(start), str(end))
+    if cache_key in DATA_CACHE: return DATA_CACHE[cache_key]
+    # Convert to KuCoin symbol
+    base = sym_yahoo.replace("-USD","")
+    kucoin_sym = f"{base}-USDT"
+    df = get_kucoin_klines(kucoin_sym, interval, limit=500 if interval=='1h' else 100,
+                           start_time=start, end_time=end)
+    if not df.empty:
+        DATA_CACHE[cache_key] = df
+        return df
+    # Yahoo fallback
+    print(f"KuCoin unavailable for {sym_yahoo}, falling back to Yahoo")
+    df = get_yahoo_klines(sym_yahoo, interval, days=days, start=start, end=end)
+    if not df.empty:
+        DATA_CACHE[cache_key] = df
+        return df
+    return pd.DataFrame()
 
 # ========== INDICATORS ==========
 def ema(series, period): return series.ewm(span=period, adjust=False).mean()
@@ -212,9 +254,9 @@ def adx(df, period=14):
     adx_val = dx.ewm(alpha=1/period, adjust=False).mean()
     return adx_val.iloc[-1], di_plus.iloc[-1], di_minus.iloc[-1]
 
-# ========== 5‑LAYER SCORING ==========
+# ========== 5‑LAYER SCORING (uses get_hybrid_klines) ==========
 def get_technicals(sym_yahoo):
-    df = get_yahoo_klines(sym_yahoo, '4h', days=14)
+    df = get_hybrid_klines(sym_yahoo, '4h', days=14)
     if df.empty or len(df) < 50:
         return {"trend":0, "adx":0, "structure":0, "combined":0, "trend_dir":"up", "ema50_distance":1.0, "adx_value":0, "error":"insufficient 4h data"}
     closes = df['Close']; highs = df['High']; lows = df['Low']
@@ -237,7 +279,6 @@ def get_technicals(sym_yahoo):
         if di_plus > di_minus: adx_score = 1.0
         else: adx_score = -1.0
 
-    # Structure (7‑bar swing points)
     window = 7
     lookback = min(50, len(highs))
     h = highs.iloc[-lookback:]; l = lows.iloc[-lookback:]
@@ -249,8 +290,7 @@ def get_technicals(sym_yahoo):
             swing_lows.append(l.iloc[i])
     structure_score = 0
     if len(swing_highs) >= 2 and len(swing_lows) >= 2:
-        hh = swing_highs[-1] > swing_highs[-2]
-        hl = swing_lows[-1] > swing_lows[-2]
+        hh = swing_highs[-1] > swing_highs[-2]; hl = swing_lows[-1] > swing_lows[-2]
         if hh and hl:
             if len(swing_highs) >= 3 and len(swing_lows) >= 3:
                 if swing_highs[-2] > swing_highs[-3] and swing_lows[-2] > swing_lows[-3]:
@@ -272,7 +312,7 @@ def get_technicals(sym_yahoo):
             "trend_dir": trend_dir, "ema50_distance": ema50_distance, "adx_value": adx_val, "error": None}
 
 def get_buying_pressure(sym_yahoo):
-    df = get_yahoo_klines(sym_yahoo, '4h', days=10)
+    df = get_hybrid_klines(sym_yahoo, '4h', days=10)
     if df.empty or len(df) < 48: return 0.0
     df = df.tail(48)
     buy_vol = df.loc[df['Close'] > df['Open'], 'Volume'].sum()
@@ -282,7 +322,7 @@ def get_buying_pressure(sym_yahoo):
     return (buy_vol - sell_vol) / total
 
 def get_volatility_score(sym_yahoo, current_price):
-    df = get_yahoo_klines(sym_yahoo, '4h', days=14)
+    df = get_hybrid_klines(sym_yahoo, '4h', days=14)
     if df.empty or len(df) < 14: return -1
     a = atr(df)
     if a is None: return -1
@@ -290,14 +330,14 @@ def get_volatility_score(sym_yahoo, current_price):
     return 1 if 2 <= pct <= 7 else -1
 
 def btc_trend_score():
-    df = get_yahoo_klines("BTC-USD", '4h', days=14)
+    df = get_hybrid_klines("BTC-USD", '4h', days=14)
     if df.empty or len(df) < 50: return 0
     ema50 = ema(df['Close'], 50)
     current = df['Close'].iloc[-1]
     return 2 if current > ema50.iloc[-1] else -2
 
 def volume_trend_score(sym_yahoo, direction=None):
-    df = get_yahoo_klines(sym_yahoo, '4h', days=5)
+    df = get_hybrid_klines(sym_yahoo, '4h', days=5)
     if df.empty or len(df) < 12: return 0
     recent = df['Volume'].tail(6)
     first = recent[:3].mean(); second = recent[3:].mean()
@@ -308,7 +348,7 @@ def volume_trend_score(sym_yahoo, direction=None):
     return 0
 
 def momentum_alignment_score(sym_yahoo, direction, layers):
-    df = get_yahoo_klines(sym_yahoo, '4h', days=2)
+    df = get_hybrid_klines(sym_yahoo, '4h', days=2)
     if df.empty or len(df) < 2: return 0.0
     last = df.iloc[-1]
     candle_ok = (direction=="LONG" and last['Close']>last['Open']) or (direction=="SHORT" and last['Close']<last['Open'])
@@ -354,13 +394,13 @@ def score_coin(sym_yahoo, current_price, btc_score):
               "intermarket": intermarket, "volume_trend": vol_trend}
     return total, layers, tech["ema50_distance"], adx_val, trend_dir, []
 
-# ========== AI REASONING ==========
+# ========== AI REASONING (Qwen 2.5 32B) ==========
 def ai_reasoning(sym, entry, atr_val, layers, errors):
     if not AI_ENABLED: return 6, "AI disabled"
     layer_str = "; ".join(f"{k}={v:.2f}" for k,v in layers.items())
-    prompt = (f"Trade signal for {sym} at {entry:.5f}. 4h ATR: {atr_val:.4f}. "
+    prompt = (f"Crypto trade signal for {sym} at {entry:.5f}. 4h ATR: {atr_val:.4f}. "
               f"Layer scores: {layer_str}. "
-              f"Provide short reasoning (1-2 sentences) and a confidence 4-7. "
+              f"Provide a concise, analytical reasoning (1-2 sentences) and a confidence score 4-7. "
               f"Format: CONFIDENCE: 6 | REASONING: ...")
     try:
         resp = requests.post("https://api.groq.com/openai/v1/chat/completions",
@@ -394,17 +434,17 @@ def generate_signal():
     btc_score = btc_trend_score()
     candidates = []
     for yahoo_sym in CRYPTO_PAIRS:
-        base = yahoo_sym.replace("-USD","")
         if yahoo_sym in open_risky: continue
-        price_df = get_yahoo_klines(yahoo_sym, '1h', days=1)
+        # Use 1h data to get current price
+        price_df = get_hybrid_klines(yahoo_sym, '1h', days=1)
         if price_df.empty: continue
         price = price_df['Close'].iloc[-1]
         score, layers, ema_dist, adx_val, trend_dir, errors = score_coin(yahoo_sym, price, btc_score)
-        atr_val = atr(get_yahoo_klines(yahoo_sym, '4h', days=14)) or price*0.02
-        # optional volatility cap (can be removed)
+        atr_val = atr(get_hybrid_klines(yahoo_sym, '4h', days=14)) or price*0.02
         if atr_val/price > 0.07: score = 0.0
         candidates.append({"symbol": yahoo_sym, "price": price, "score": score, "layers": layers,
                            "adx": adx_val, "trend_dir": trend_dir, "atr": atr_val, "errors": errors})
+
     if not candidates:
         return {"action": "HOLD", "reasoning": "No valid candidates."}
 
@@ -413,11 +453,9 @@ def generate_signal():
         return {"action": "HOLD", "reasoning": f"No strong conviction. Best: {best['symbol']} ({best['score']:.2f})"}
 
     direction = "LONG" if best["score"] > 0 else "SHORT"
-    # 4h trend filter
     if (direction == "LONG" and best["trend_dir"] == "down") or (direction == "SHORT" and best["trend_dir"] == "up"):
-        return {"action": "HOLD", "reasoning": f"Signal rejected by 4h trend filter."}
+        return {"action": "HOLD", "reasoning": "Signal rejected by 4h trend filter."}
 
-    # Bonuses
     best["score"] += trend_strength_bonus(best["adx"], best["score"])
     best["score"] += momentum_alignment_score(best["symbol"], direction, best["layers"])
     if abs(best["score"]) < CONFIG["trading"]["min_score_to_enter"]:
@@ -425,7 +463,6 @@ def generate_signal():
 
     entry = best["price"] * (0.999 if direction=="LONG" else 1.001)
     atr_val = best["atr"]
-    # Dynamic stop: 2.5xATR, no hard cap, 1% floor
     stop_distance = max(2.5 * atr_val, best["price"] * 0.01)
     stop = entry - stop_distance if direction=="LONG" else entry + stop_distance
     risk = abs(entry - stop)
@@ -450,7 +487,7 @@ def generate_signal():
         "atr": atr_val
     }
 
-# ========== STOP MANAGEMENT (with trailing after TP3) ==========
+# ========== STOP MANAGEMENT ==========
 def get_current_stop(trade, current_price=None, atr_val=None):
     entry = float(trade["entry"])
     stop_orig = float(trade["stop"])
@@ -466,18 +503,17 @@ def get_current_stop(trade, current_price=None, atr_val=None):
         return tps[0]
     if highest_tp_idx == 2:
         return tps[1]
-    # TP3 or higher → trailing stop
     if highest_tp_idx >= 3 and current_price is not None and atr_val is not None:
         trail_mult = CONFIG["trading"]["trailing_atr_multiplier"]
         if trade["action"] == "LONG":
             trail_stop = current_price - trail_mult * atr_val
-            return max(trail_stop, tps[1])  # never below TP2
+            return max(trail_stop, tps[1])
         else:
             trail_stop = current_price + trail_mult * atr_val
             return min(trail_stop, tps[1])
     return stop_orig
 
-# ========== TRADE MANAGEMENT (stop‑first candle logic) ==========
+# ========== TRADE MANAGEMENT ==========
 def check_open_trades():
     try: open_df = pd.read_csv(CONFIG["files"]["open_trades"])
     except: return
@@ -497,7 +533,7 @@ def check_open_trades():
         try: entry_time = datetime.strptime(trade["timestamp"], "%Y-%m-%d %H:%M:%S")
         except: still_open.append(trade); continue
 
-        df_1h = get_yahoo_klines(sym, '1h', start=entry_time, end=now)
+        df_1h = get_hybrid_klines(sym, '1h', start=entry_time, end=now)
         if df_1h.empty:
             still_open.append(trade); continue
         df_1h = df_1h[df_1h.index >= entry_time]
@@ -508,13 +544,10 @@ def check_open_trades():
         current_stop = get_current_stop(trade)
         trade_closed = False
         closed_parts = []
-        # store atr for trailing
-        atr_val_trade = float(trade.get("atr", 0)) or (atr(get_yahoo_klines(sym, '4h', days=14)) or 0)
+        atr_val_trade = float(trade.get("atr", 0)) or (atr(get_hybrid_klines(sym, '4h', days=14)) or 0)
 
         for candle_time, candle in df_1h.iterrows():
             high = candle['High']; low = candle['Low']
-
-            # Stop always checked before TP in same candle
             sl_hit = (direction == "LONG" and low <= current_stop) or (direction == "SHORT" and high >= current_stop)
             if sl_hit:
                 exit_price = current_stop
@@ -525,7 +558,6 @@ def check_open_trades():
                 alerts.append(f"**{sym.replace('-USD','')} {direction}**\n{'🔴' if 'STOP' in hit_desc else '🛑'} {hit_desc}\nP&L: {pnl:.2f} USDT")
                 break
 
-            # Process TPs
             if direction == "LONG":
                 new_tp_idx = None
                 for i in range(len(tps)-1, -1, -1):
@@ -546,21 +578,15 @@ def check_open_trades():
                         closed_parts.append({"exit_price": exit_price_tp, "quantity": exit_qty, "pnl": pnl, "hit_level": f"TP{i+1}"})
                         remaining_qty -= exit_qty
                         highest_tp_idx = i
-                        if i == 0:
-                            breakeven = True
-                        trade["highest_tp"] = highest_tp_idx
-                        trade["breakeven"] = breakeven
+                        if i == 0: breakeven = True
+                        trade["highest_tp"] = highest_tp_idx; trade["breakeven"] = breakeven
                         current_stop = get_current_stop(trade, current_price=high if direction=="LONG" else low, atr_val=atr_val_trade)
                         alerts.append(f"🎯 **{sym.replace('-USD','')} {direction}** TP{i+1} Hit! PnL: {pnl:.2f} USDT | Remaining: {remaining_qty:.6f} units")
-                        if remaining_qty <= 0:
-                            trade_closed = True
-                            break
+                        if remaining_qty <= 0: trade_closed = True; break
                 if trade_closed: break
 
         if remaining_qty > 0 and not trade_closed:
-            trade["quantity"] = remaining_qty
-            trade["highest_tp"] = highest_tp_idx
-            trade["breakeven"] = breakeven
+            trade["quantity"] = remaining_qty; trade["highest_tp"] = highest_tp_idx; trade["breakeven"] = breakeven
             still_open.append(trade)
         else:
             total_pnl = sum(p["pnl"] for p in closed_parts)
@@ -570,7 +596,6 @@ def check_open_trades():
                 results.append({**trade.to_dict(), "hit_level": cp["hit_level"],
                                 "close_time": now.strftime("%Y-%m-%d %H:%M:%S"),
                                 "exit_price": cp["exit_price"], "quantity": cp["quantity"], "pnl": cp["pnl"]})
-            # send close chart for the last hit
             if closed_parts:
                 send_trade_close_chart(trade, closed_parts[-1]["hit_level"], closed_parts[-1]["exit_price"], total_pnl)
 
@@ -584,20 +609,16 @@ def check_open_trades():
         portfolio["open_positions"] = 0
     save_portfolio(portfolio)
 
-    # Send Discord alerts
     for alert in alerts:
         send_discord(alert)
-
-    # Performance report every 10 trades
     check_performance_report()
 
-# ========== PERFORMANCE REPORT (every 10 fully closed trades) ==========
+# ========== PERFORMANCE REPORT ==========
 def check_performance_report():
     try:
         df = pd.read_csv(CONFIG["files"]["trade_results"])
     except: return
     if df.empty: return
-    # Group by timestamp+symbol to get trade-level PnL
     trade_groups = df.groupby(['timestamp', 'symbol'])
     closed_trades = trade_groups.agg(total_pnl=('pnl','sum'), action=('action','first')).reset_index()
     total_trades = len(closed_trades)
@@ -607,15 +628,13 @@ def check_performance_report():
             try: last_reported = int(f.read().strip())
             except: pass
     milestone = (total_trades // 10) * 10
-    if milestone <= last_reported:
-        return
+    if milestone <= last_reported: return
     wins = closed_trades[closed_trades['total_pnl'] > 0]
     losses = closed_trades[closed_trades['total_pnl'] < 0]
     total_wins = len(wins); total_losses = len(losses)
     winrate = (total_wins / (total_wins+total_losses)) * 100 if (total_wins+total_losses) > 0 else 0
     total_pnl = closed_trades['total_pnl'].sum()
     profit_factor = wins['total_pnl'].sum() / abs(losses['total_pnl'].sum()) if total_losses > 0 else float('inf')
-    # streaks
     closed_trades = closed_trades.sort_values('timestamp')
     win_streak = loss_streak = 0
     for _, row in closed_trades.iloc[::-1].iterrows():
@@ -633,7 +652,7 @@ def check_performance_report():
         f"Total P&L: {total_pnl:.2f} USDT\n"
         f"Winrate: {winrate:.1f}% ({total_wins}W/{total_losses}L)\n"
         f"Profit Factor: {profit_factor:.2f}\n"
-        f"Current Win Streak: {win_streak} 🔥 | Loss Streak: {loss_streak} 😞\n"
+        f"Win Streak: {win_streak} 🔥 | Loss Streak: {loss_streak} 😞\n"
         f"Best: {best['symbol']} {best['action']} {best['total_pnl']:.2f} USDT\n"
         f"Worst: {worst['symbol']} {worst['action']} {worst['total_pnl']:.2f} USDT"
     )
@@ -641,7 +660,7 @@ def check_performance_report():
     with open(CONFIG["files"]["perf_counter"], 'w') as f:
         f.write(str(milestone))
 
-# ========== DISCORD HELPERS (text + chart) ==========
+# ========== DISCORD HELPERS (chart‑ready) ==========
 def send_discord(text):
     if DISCORD_WEBHOOK_URL:
         try: requests.post(DISCORD_WEBHOOK_URL, json={"content": text[:2000]}, timeout=10)
@@ -659,14 +678,16 @@ def send_trade_chart(signal):
     try:
         import matplotlib; matplotlib.use('Agg')
         import matplotlib.pyplot as plt; import mplfinance as mpf
-        df = get_yahoo_klines(sym, '4h', days=21)
-        if df.empty or len(df) < 20: return
+        df = get_hybrid_klines(sym, '4h', days=21)
+        if df.empty or len(df) < 20:
+            raise ValueError(f"not enough candles ({len(df)})")
         mpf_style = mpf.make_mpf_style(base_mpf_style='nightclouds', facecolor='#000000', gridcolor='#2a2e39',
                                        rc={'axes.labelcolor':'white','xtick.color':'white','ytick.color':'white','axes.titlecolor':'white'})
         ema50 = df['Close'].ewm(span=min(50,len(df)), adjust=False).mean()
         addplots = [mpf.make_addplot(ema50, color='#f39c12', width=1.5, label='EMA50')]
-        fig, ax = mpf.plot(df, type='candle', style=mpf_style, title=f"{sym} 4h", ylabel='Price',
-                           addplot=addplots, returnfig=True, figsize=(8,6))
+        fig, axes = mpf.plot(df, type='candle', style=mpf_style, title=f"{sym} 4h", ylabel='Price',
+                             addplot=addplots, returnfig=True, figsize=(8,6))
+        ax = axes[0]
         entry = signal.get('limit_price'); stop = signal.get('stop_loss'); tps = signal.get('take_profits')
         if entry:
             ax.axhline(y=entry, color='#f1c40f', linestyle='--', linewidth=1.5, label='Entry')
@@ -679,7 +700,10 @@ def send_trade_chart(signal):
         plt.close(fig)
         send_discord_image(path, caption=f"{sym} – {signal['action']} Setup")
         os.remove(path)
-    except Exception as e: print(f"Chart error: {e}")
+    except Exception as e:
+        err = f"⚠️ Chart error for {sym}: {str(e)[:200]}"
+        print(err)
+        send_discord(err)
 
 def send_trade_close_chart(trade, hit_level, exit_price, pnl):
     sym = trade["symbol"]; direction = trade["action"]
@@ -687,13 +711,14 @@ def send_trade_close_chart(trade, hit_level, exit_price, pnl):
         import matplotlib; matplotlib.use('Agg')
         import matplotlib.pyplot as plt; import mplfinance as mpf
         entry_time = datetime.strptime(trade["timestamp"], "%Y-%m-%d %H:%M:%S")
-        df = get_yahoo_klines(sym, '1h', start=entry_time, end=datetime.now())
-        if df.empty: return
+        df = get_hybrid_klines(sym, '1h', start=entry_time, end=datetime.now())
+        if df.empty: raise ValueError("no 1h data")
         mpf_style = mpf.make_mpf_style(base_mpf_style='nightclouds', facecolor='#000000', gridcolor='#2a2e39',
                                        rc={'axes.labelcolor':'white','xtick.color':'white','ytick.color':'white','axes.titlecolor':'white'})
-        fig, ax = mpf.plot(df, type='candle', style=mpf_style,
-                           title=f"{sym} {direction} – {hit_level} (PnL: {pnl:.2f}$)", ylabel='Price',
-                           returnfig=True, figsize=(8,6))
+        fig, axes = mpf.plot(df, type='candle', style=mpf_style,
+                             title=f"{sym} {direction} – {hit_level} (PnL: {pnl:.2f}$)", ylabel='Price',
+                             returnfig=True, figsize=(8,6))
+        ax = axes[0]
         entry = float(trade["entry"]); stop = float(trade["stop"])
         tps = [float(trade[f"TP{i+1}"]) for i in range(5)]
         ax.axhline(y=entry, color='#f1c40f', linestyle='--', linewidth=1.5, label='Entry')
@@ -707,7 +732,10 @@ def send_trade_close_chart(trade, hit_level, exit_price, pnl):
         plt.close(fig)
         send_discord_image(path, caption=f"{sym} {direction} – {hit_level}")
         os.remove(path)
-    except Exception as e: print(f"Close chart error: {e}")
+    except Exception as e:
+        err = f"⚠️ Close chart error for {sym}: {str(e)[:200]}"
+        print(err)
+        send_discord(err)
 
 # ========== DAILY PNL ==========
 def daily_pnl():
@@ -736,7 +764,6 @@ def main():
         add_open_trade(sig)
         portfolio["open_positions"] += 1
         save_portfolio(portfolio)
-        # Discord signal + chart
         sym = sig["symbol"].replace("-USD","")
         entry = sig["limit_price"]; stop = sig["stop_loss"]; tps = sig["take_profits"]
         risk = abs(entry - stop); stop_pct = risk/entry*100
