@@ -45,8 +45,8 @@ CONFIG = {
     },
     "ai": {
         "enabled": True,
-        "model": "llama-3.3-70b-versatile",   # primary model
-        "fallback_model": "qwen-2.5-32b",     # fallback if primary fails
+        "model": "llama-3.3-70b-versatile",
+        "fallback_model": "qwen-2.5-32b",
         "temperature": 0.3
     },
     "files": {
@@ -57,7 +57,7 @@ CONFIG = {
         "perf_counter": "perf_counter.txt"
     },
     "backtest": {
-        "start_date": "2024-08-01",           # within KuCoin/Yahoo range
+        "start_date": "2024-08-01",
         "end_date": "today",
         "initial_balance": 1000.0,
         "fee_pct": 0.1,
@@ -187,7 +187,13 @@ def add_open_trade(sig):
            "highest_tp": -1, "breakeven": False}
     safe_append_csv(CONFIG["files"]["open_trades"], pd.DataFrame([row]))
 
-# ========== KUCOIN DATA FETCH (primary) ==========
+# ========== DATA FETCH (timezone‑aware protection) ==========
+def _naive(df):
+    """Strip timezone info from index so all comparisons are naive UTC."""
+    if df is not None and not df.empty and df.index.tz is not None:
+        df.index = df.index.tz_localize(None)
+    return df
+
 def get_kucoin_klines(sym_kucoin, interval, limit=100, start_time=None, end_time=None):
     interval_map = {'1h': '1hour', '4h': '4hour', '1d': '1day'}
     kucoin_interval = interval_map.get(interval, interval)
@@ -210,7 +216,7 @@ def get_kucoin_klines(sym_kucoin, interval, limit=100, start_time=None, end_time
         df = pd.DataFrame(rows).set_index('open_time').sort_index()
         df = df[['Open','High','Low','Close','Volume']]
         return df.tail(limit) if len(df) > limit else df
-    except Exception as e:
+    except:
         return pd.DataFrame()
 
 def get_yahoo_klines(sym_yahoo, interval, days=14, start=None, end=None):
@@ -224,8 +230,9 @@ def get_yahoo_klines(sym_yahoo, interval, days=14, start=None, end=None):
         df = yf.download(sym_yahoo, start=start, end=end, interval=interval, progress=False)
         if df.empty: return pd.DataFrame()
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
-        return df
-    except: return pd.DataFrame()
+        return _naive(df)                      # ← force naive index
+    except:
+        return pd.DataFrame()
 
 def get_hybrid_klines(sym_yahoo, interval, days=14, start=None, end=None):
     cache_key = (sym_yahoo, interval, days, str(start), str(end))
@@ -516,7 +523,7 @@ def generate_signal():
 def get_current_stop(trade, current_price=None, atr_val=None):
     entry = float(trade["entry"])
     stop_orig = float(trade["stop"])
-    # Support both list (backtest) and individual keys (CSV)
+    # support both list (backtest) and individual keys (CSV)
     if "take_profits" in trade and isinstance(trade["take_profits"], list):
         tps = [float(tp) for tp in trade["take_profits"]]
     else:
@@ -558,7 +565,6 @@ def check_open_trades():
         original_qty = float(trade.get("original_qty", trade.get("quantity",0)))
         remaining_qty = float(trade.get("quantity", original_qty))
         breakeven = trade.get("breakeven", False)
-        # For CSV, TP columns already exist
         tps = [float(trade[f"TP{i+1}"]) for i in range(5)]
         try: entry_time = datetime.strptime(trade["timestamp"], "%Y-%m-%d %H:%M:%S")
         except: still_open.append(trade); continue
@@ -690,7 +696,7 @@ def check_performance_report():
     with open(CONFIG["files"]["perf_counter"], 'w') as f:
         f.write(str(milestone))
 
-# ========== DISCORD HELPERS (chart‑ready) ==========
+# ========== DISCORD HELPERS ==========
 def send_discord(text):
     if DISCORD_WEBHOOK_URL:
         try: requests.post(DISCORD_WEBHOOK_URL, json={"content": text[:2000]}, timeout=10)
@@ -845,7 +851,8 @@ class BacktestEngine:
                                start_time=start_date, end_time=end_date)
         if not df.empty:
             return df
-        return get_yahoo_klines(sym_yahoo, interval, days=days, start=start_date, end=end_date)
+        df = get_yahoo_klines(sym_yahoo, interval, days=days, start=start_date, end=end_date)
+        return _naive(df)   # ensure naive index for safe comparison
 
     def score_at(self, sym_yahoo, current_price, btc_score, date):
         df_4h = self.get_historical_klines(sym_yahoo, '4h', date, days=14)
@@ -937,6 +944,7 @@ class BacktestEngine:
         days_needed = max((next_date - current_date).days + 2, 5)
         df_1h = self.get_historical_klines(sym, '1h', next_date, days=days_needed)
         if df_1h.empty: return trade, False
+        # current_date is naive, df_1h.index is now guaranteed naive
         df_1h = df_1h[df_1h.index >= current_date]
         if df_1h.empty: return trade, False
 
