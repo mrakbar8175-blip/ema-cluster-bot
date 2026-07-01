@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Swing Sentinel – Quant‑Grade Crypto Swing Bot (4H)
-All fixes applied – signal logged only on successful trade, backtest friendly defaults.
+All fixes applied – 50% TP1, 15% TP2, 10% TP3/TP4, 15% TP5.
 Run live:    python swing_sentinel.py
 Backtest:    python swing_sentinel.py --backtest
 """
@@ -22,7 +22,7 @@ CONFIG = {
         "atr_stop_multiplier": 2.5,
         "trailing_atr_multiplier": 2.0,
         "tp_multipliers": [0.4, 0.8, 1.2, 1.6, 2.0],
-        "fractions": [0.30, 0.10, 0.10, 0.10, 0.40],
+        "fractions": [0.50, 0.15, 0.10, 0.10, 0.15],   # 50% at TP1, 15% at TP2, 10% TP3/TP4, 15% TP5
         "daily_loss_limit": -100
     },
     "scoring": {
@@ -35,7 +35,7 @@ CONFIG = {
         }
     },
     "universe": {
-        "limit": 20,                         # keep fast for GitHub Actions
+        "limit": 20,                         # top‑20 market cap coins
         "blacklist": [
             "QUQ","USDT","USDC","DAI","BUSD","TUSD","USDP","FDUSD",
             "LEO","WBT","USD1","USDS","USDE","USDG","USDY","PYUSD",
@@ -62,7 +62,7 @@ CONFIG = {
         "initial_balance": 1000.0,
         "fee_pct": 0.1,
         "slippage_pct": {"top_10": 0.02, "other": 0.05},
-        "run_interval_hours": 8              # 8h steps to speed up
+        "run_interval_hours": 8              # 8h steps to finish under 6h
     }
 }
 # =======================================================
