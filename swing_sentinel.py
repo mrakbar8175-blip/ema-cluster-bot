@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Swing Sentinel – Quant‑Grade Crypto Swing Bot (4H)
-All fixes applied – 50% TP1, 15% TP2, 10% TP3/TP4, 15% TP5.
+50 coins, 4‑hour backtest (fast), winrate in summary.
 Run live:    python swing_sentinel.py
 Backtest:    python swing_sentinel.py --backtest
 """
@@ -35,7 +35,7 @@ CONFIG = {
         }
     },
     "universe": {
-        "limit": 20,                         # top‑20 market cap coins
+        "limit": 50,                         # full 50 coins
         "blacklist": [
             "QUQ","USDT","USDC","DAI","BUSD","TUSD","USDP","FDUSD",
             "LEO","WBT","USD1","USDS","USDE","USDG","USDY","PYUSD",
@@ -57,12 +57,12 @@ CONFIG = {
         "perf_counter": "perf_counter.txt"
     },
     "backtest": {
-        "start_date": "2025-01-01",          # 18 months of data
+        "start_date": "2024-08-01",          # 2 years of data
         "end_date": "today",
         "initial_balance": 1000.0,
         "fee_pct": 0.1,
         "slippage_pct": {"top_10": 0.02, "other": 0.05},
-        "run_interval_hours": 8              # 8h steps to finish under 6h
+        "run_interval_hours": 4              # 4h steps
     }
 }
 # =======================================================
@@ -73,7 +73,7 @@ AI_ENABLED = CONFIG["ai"]["enabled"] and GROQ_API_KEY is not None
 
 LOCK_FILE = "bot.lock"
 COIN_RANK = {}
-LIVE_FEE_PCT = CONFIG["backtest"]["fee_pct"] / 100.0   # 0.1% fee for live trading consistency
+LIVE_FEE_PCT = CONFIG["backtest"]["fee_pct"] / 100.0
 
 # ========== INSTANCE LOCK ==========
 def acquire_lock():
@@ -174,7 +174,6 @@ def log_signal(sig):
     safe_append_csv(CONFIG["files"]["trade_log"], pd.DataFrame([row]))
 
 def add_open_trade(sig):
-    """Adds a trade to the live portfolio. Returns True if trade was booked, False if rejected (e.g., short cap)."""
     entry = sig["limit_price"]
     qty = sig["quantity"]
     notional = entry * qty
@@ -183,15 +182,14 @@ def add_open_trade(sig):
 
     if direction == "LONG":
         portfolio["balance"] -= notional + fee
-    else:  # SHORT
+    else:
         current_short_notional = 0.0
         try:
             open_df = pd.read_csv(CONFIG["files"]["open_trades"])
             for _, t in open_df.iterrows():
                 if t.get("action") == "SHORT":
                     current_short_notional += float(t.get("notional", 0))
-        except:
-            pass
+        except: pass
         if current_short_notional + notional > portfolio["balance"]:
             send_discord("SHORT signal rejected – short exposure cap reached")
             return False
@@ -210,7 +208,7 @@ def add_open_trade(sig):
     save_portfolio(portfolio)
     return True
 
-# ========== KUCOIN DATA FETCH (with days support & retry) ==========
+# ========== DATA FETCH (KuCoin, Yahoo daily) ==========
 def get_kucoin_klines(sym_kucoin, interval, limit=100, start_time=None, end_time=None, days=None):
     if days is not None and start_time is None and end_time is None:
         end = datetime.now(timezone.utc)
@@ -488,7 +486,7 @@ def ai_reasoning(sym, entry, atr_val, layers, errors):
     if conf is not None: return conf, reason
     return 6, "AI unavailable, using default confidence"
 
-# ========== SIGNAL GENERATION (live – all timestamps UTC) ==========
+# ========== SIGNAL GENERATION (live) ==========
 def generate_signal():
     open_risky = set()
     try:
@@ -579,10 +577,8 @@ def get_current_stop(trade, current_price=None, atr_val=None):
         return tps[0]
     if highest_tp_idx == 2:
         return tps[1]
-    # TP3 or higher → trailing stop with dynamic floor
     if highest_tp_idx >= 3 and current_price is not None and atr_val is not None:
         trail_mult = CONFIG["trading"]["trailing_atr_multiplier"]
-        # Floor is the last locked TP level: tps[highest_tp_idx - 1]
         floor = tps[highest_tp_idx - 1]
         if trade["action"] == "LONG":
             trail_stop = current_price - trail_mult * atr_val
@@ -592,7 +588,7 @@ def get_current_stop(trade, current_price=None, atr_val=None):
             return min(trail_stop, floor)
     return stop_orig
 
-# ========== LIVE TRADE MANAGEMENT (all UTC) ==========
+# ========== LIVE TRADE MANAGEMENT ==========
 def check_open_trades():
     try: open_df = pd.read_csv(CONFIG["files"]["open_trades"])
     except: return
@@ -841,7 +837,7 @@ def send_trade_close_chart(trade, hit_level, exit_price, pnl):
         print(err)
         send_discord(err)
 
-# ========== DAILY PNL (UTC) ==========
+# ========== DAILY PNL ==========
 def daily_pnl():
     try:
         df = pd.read_csv(CONFIG["files"]["trade_results"])
@@ -852,7 +848,7 @@ def daily_pnl():
         return daily['pnl'].sum() if not daily.empty else 0.0
     except: return 0.0
 
-# ========== LIVE MAIN (fixed short‑cap handling) ==========
+# ========== LIVE MAIN ==========
 def live_main():
     acquire_lock()
     initialize_files()
@@ -865,7 +861,7 @@ def live_main():
     sig = generate_signal()
     if sig["action"] in ("LONG", "SHORT"):
         if add_open_trade(sig):
-            log_signal(sig)          # ← logged only if trade successfully booked
+            log_signal(sig)
             portfolio["open_positions"] += 1
             save_portfolio(portfolio)
             sym = sig["symbol"].replace("-USD","")
@@ -877,12 +873,11 @@ def live_main():
                   f"Conviction: {sig['conviction_score']:.2f}/3 | AI: {sig['confidence_score']}/10\n{sig['reasoning']}"
             send_discord(msg)
             send_trade_chart(sig)
-        # if add_open_trade returned False, it already sent a Discord rejection message
     else:
         send_discord(f"HOLD – {sig['reasoning']}")
     release_lock()
 
-# ========== BACKTEST ENGINE (final – net PnL, dynamic trailing floor, short cap) ==========
+# ========== BACKTEST ENGINE (4‑H only, fast, compact output with winrate) ==========
 class BacktestEngine:
     def __init__(self, coins):
         self.coins = coins
@@ -913,11 +908,11 @@ class BacktestEngine:
         fee_cost = filled_price * self.fee
         return filled_price, fee_cost
 
-    def get_historical_klines(self, sym_yahoo, interval, end_date, days=14):
+    def get_4h_klines(self, sym_yahoo, end_date, days=14):
         base = sym_yahoo.replace("-USD","")
         kucoin_sym = f"{base}-USDT"
         start_date = end_date - timedelta(days=days)
-        df = get_kucoin_klines(kucoin_sym, interval, start_time=start_date, end_time=end_date)
+        df = get_kucoin_klines(kucoin_sym, '4h', start_time=start_date, end_time=end_date)
         if df.empty:
             return pd.DataFrame()
         if df.index.tz is not None:
@@ -925,7 +920,7 @@ class BacktestEngine:
         return df
 
     def score_at(self, sym_yahoo, current_price, btc_score, date):
-        df_4h = self.get_historical_klines(sym_yahoo, '4h', date, days=14)
+        df_4h = self.get_4h_klines(sym_yahoo, date, days=14)
         if df_4h.empty: return None
         df_daily = get_yahoo_daily(sym_yahoo, days=200, end=date)
         tech = get_technicals(sym_yahoo, df_4h=df_4h, df_daily=df_daily)
@@ -953,15 +948,15 @@ class BacktestEngine:
         if len(open_risky) >= CONFIG["trading"]["max_risky_trades"]:
             return None
 
-        btc_df = self.get_historical_klines("BTC-USD", '4h', date, days=14)
+        btc_df = self.get_4h_klines("BTC-USD", date, days=14)
         btc_score = btc_trend_score(df_4h=btc_df) if not btc_df.empty else 0
 
         candidates = []
         for yahoo_sym in self.coins:
             if yahoo_sym in open_risky: continue
-            price_df = self.get_historical_klines(yahoo_sym, '1h', date, days=1)
-            if price_df.empty: continue
-            price = price_df['Close'].iloc[-1]
+            df_4h = self.get_4h_klines(yahoo_sym, date, days=1)
+            if df_4h.empty: continue
+            price = df_4h['Close'].iloc[-1]
             res = self.score_at(yahoo_sym, price, btc_score, date)
             if res is None: continue
             atr_val = res['atr']
@@ -993,13 +988,12 @@ class BacktestEngine:
         filled_entry, fee_per_unit = self.apply_fee_and_slippage(entry, 'buy' if direction=="LONG" else 'sell', best["symbol"])
         total_fee = fee_per_unit * qty
         notional = filled_entry * qty
-        # Enforce short exposure cap
         if direction == "LONG":
             self.balance -= notional + total_fee
         else:
             current_short_notional = sum(t.get("notional", 0) for t in self.open_trades if t["action"] == "SHORT")
             if current_short_notional + notional > self.balance:
-                return None  # skip trade
+                return None
             self.balance += notional - total_fee
 
         trade = {
@@ -1014,98 +1008,131 @@ class BacktestEngine:
             trade[f"TP{i+1}"] = tp
         return trade
 
-    def simulate_trade_life(self, trade, current_date, next_date):
+    def simulate_trade_life_4h(self, trade, candle):
         sym = trade["symbol"]; direction = trade["action"]
         entry = trade["entry"]; stop_orig = trade["stop"]
         tps = trade["take_profits"]
         remaining_qty = trade["remaining_qty"]; original_qty = trade["original_qty"]
         highest_tp_idx = trade["highest_tp"]; breakeven = trade["breakeven"]
-        notional = trade.get("notional", entry * original_qty)
         current_stop = get_current_stop(trade)
 
-        days_needed = max((next_date - current_date).days + 2, 5)
-        df_1h = self.get_historical_klines(sym, '1h', next_date, days=days_needed)
-        if df_1h.empty: return trade, False
-        df_1h = df_1h[df_1h.index >= current_date]
-        if df_1h.empty: return trade, False
+        high = candle['High']; low = candle['Low']
+        closed_parts = []
 
-        closed_parts = []; trade_closed = False
-        atr_val_trade = trade.get("atr", 0) or (atr(df_1h) or 0)
-
-        for candle_time, candle in df_1h.iterrows():
-            high = candle['High']; low = candle['Low']
-            sl_hit = (direction == "LONG" and low <= current_stop) or (direction == "SHORT" and high >= current_stop)
-            if sl_hit:
-                exit_price = current_stop
-                slip, fee_per_unit = self.apply_fee_and_slippage(exit_price, 'sell' if direction=="LONG" else 'buy', sym)
-                filled_exit = slip; fee_cost = fee_per_unit * remaining_qty
-                if direction == "LONG":
-                    self.balance += filled_exit * remaining_qty - fee_cost
-                    pnl = (filled_exit - entry) * remaining_qty - fee_cost
-                else:
-                    self.balance -= filled_exit * remaining_qty + fee_cost
-                    pnl = (entry - filled_exit) * remaining_qty - fee_cost
-                closed_parts.append({"exit_price": filled_exit, "quantity": remaining_qty, "pnl": pnl,
-                                     "hit_level": "STOP LOSS" if highest_tp_idx==-1 else f"STOP after TP{highest_tp_idx+1}"})
-                remaining_qty = 0; trade_closed = True; break
-
+        # Check stop first
+        sl_hit = (direction == "LONG" and low <= current_stop) or (direction == "SHORT" and high >= current_stop)
+        if sl_hit:
+            exit_price = current_stop
+            slip, fee_per_unit = self.apply_fee_and_slippage(exit_price, 'sell' if direction=="LONG" else 'buy', sym)
+            filled_exit = slip; fee_cost = fee_per_unit * remaining_qty
             if direction == "LONG":
-                new_tp_idx = None
-                for i in range(len(tps)-1, -1, -1):
-                    if high >= tps[i] and i > highest_tp_idx: new_tp_idx = i; break
+                self.balance += filled_exit * remaining_qty - fee_cost
+                pnl = (filled_exit - entry) * remaining_qty - fee_cost
             else:
-                new_tp_idx = None
-                for i in range(len(tps)-1, -1, -1):
-                    if low <= tps[i] and i > highest_tp_idx: new_tp_idx = i; break
-            if new_tp_idx is not None:
-                for i in range(highest_tp_idx+1, new_tp_idx+1):
-                    if remaining_qty <= 0: break
-                    fraction = CONFIG["trading"]["fractions"][i]; exit_qty = original_qty * fraction
-                    if exit_qty > remaining_qty: exit_qty = remaining_qty
-                    if exit_qty > 0:
-                        exit_price_tp = tps[i]
-                        slip, fee_per_unit = self.apply_fee_and_slippage(exit_price_tp, 'sell' if direction=="LONG" else 'buy', sym)
-                        filled_exit_tp = slip; fee_cost = fee_per_unit * exit_qty
-                        if direction == "LONG":
-                            self.balance += filled_exit_tp * exit_qty - fee_cost
-                            pnl = (filled_exit_tp - entry) * exit_qty - fee_cost
-                        else:
-                            self.balance -= filled_exit_tp * exit_qty + fee_cost
-                            pnl = (entry - filled_exit_tp) * exit_qty - fee_cost
-                        closed_parts.append({"exit_price": filled_exit_tp, "quantity": exit_qty, "pnl": pnl,
-                                             "hit_level": f"TP{i+1}"})
-                        remaining_qty -= exit_qty
-                        highest_tp_idx = i
-                        if i == 0: breakeven = True
-                        trade["highest_tp"] = highest_tp_idx; trade["breakeven"] = breakeven
-                        current_stop = get_current_stop(trade, current_price=high if direction=="LONG" else low, atr_val=atr_val_trade)
-                    if remaining_qty <= 0: trade_closed = True; break
-                if trade_closed: break
+                self.balance -= filled_exit * remaining_qty + fee_cost
+                pnl = (entry - filled_exit) * remaining_qty - fee_cost
+            closed_parts.append({"exit_price": filled_exit, "quantity": remaining_qty, "pnl": pnl,
+                                 "hit_level": "STOP LOSS" if highest_tp_idx==-1 else f"STOP after TP{highest_tp_idx+1}"})
+            return None, closed_parts
 
-        if remaining_qty > 0 and not trade_closed:
-            trade["remaining_qty"] = remaining_qty; trade["highest_tp"] = highest_tp_idx; trade["breakeven"] = breakeven
-            return trade, False
+        # Process TPs (stop not hit)
+        if direction == "LONG":
+            for i in range(len(tps)-1, -1, -1):
+                if high >= tps[i] and i > highest_tp_idx:
+                    for j in range(highest_tp_idx+1, i+1):
+                        if remaining_qty <= 0: break
+                        fraction = CONFIG["trading"]["fractions"][j]
+                        exit_qty = original_qty * fraction
+                        if exit_qty > remaining_qty: exit_qty = remaining_qty
+                        if exit_qty > 0:
+                            exit_price_tp = tps[j]
+                            slip, fee_per_unit = self.apply_fee_and_slippage(exit_price_tp, 'sell' if direction=="LONG" else 'buy', sym)
+                            filled_exit_tp = slip; fee_cost = fee_per_unit * exit_qty
+                            if direction == "LONG":
+                                self.balance += filled_exit_tp * exit_qty - fee_cost
+                                pnl = (filled_exit_tp - entry) * exit_qty - fee_cost
+                            else:
+                                self.balance -= filled_exit_tp * exit_qty + fee_cost
+                                pnl = (entry - filled_exit_tp) * exit_qty - fee_cost
+                            closed_parts.append({"exit_price": filled_exit_tp, "quantity": exit_qty, "pnl": pnl,
+                                                 "hit_level": f"TP{j+1}"})
+                            remaining_qty -= exit_qty
+                            highest_tp_idx = j
+                            if j == 0: breakeven = True
+                            trade["highest_tp"] = highest_tp_idx
+                            trade["breakeven"] = breakeven
+                            current_stop = get_current_stop(trade, current_price=high, atr_val=trade.get("atr", 0))
+                    break
         else:
-            for cp in closed_parts:
-                self.closed_trades.append({
-                    "open_time": trade["timestamp"], "close_time": candle_time.strftime("%Y-%m-%d %H:%M:%S"),
-                    "symbol": sym, "action": direction, "entry": entry, "stop": stop_orig,
-                    "take_profits": str(tps), "exit_price": cp["exit_price"],
-                    "quantity": cp["quantity"], "pnl": cp["pnl"], "hit_level": cp["hit_level"]
-                })
-            return None, True
+            for i in range(len(tps)-1, -1, -1):
+                if low <= tps[i] and i > highest_tp_idx:
+                    for j in range(highest_tp_idx+1, i+1):
+                        if remaining_qty <= 0: break
+                        fraction = CONFIG["trading"]["fractions"][j]
+                        exit_qty = original_qty * fraction
+                        if exit_qty > remaining_qty: exit_qty = remaining_qty
+                        if exit_qty > 0:
+                            exit_price_tp = tps[j]
+                            slip, fee_per_unit = self.apply_fee_and_slippage(exit_price_tp, 'sell' if direction=="LONG" else 'buy', sym)
+                            filled_exit_tp = slip; fee_cost = fee_per_unit * exit_qty
+                            if direction == "LONG":
+                                self.balance += filled_exit_tp * exit_qty - fee_cost
+                                pnl = (filled_exit_tp - entry) * exit_qty - fee_cost
+                            else:
+                                self.balance -= filled_exit_tp * exit_qty + fee_cost
+                                pnl = (entry - filled_exit_tp) * exit_qty - fee_cost
+                            closed_parts.append({"exit_price": filled_exit_tp, "quantity": exit_qty, "pnl": pnl,
+                                                 "hit_level": f"TP{j+1}"})
+                            remaining_qty -= exit_qty
+                            highest_tp_idx = j
+                            if j == 0: breakeven = True
+                            trade["highest_tp"] = highest_tp_idx
+                            trade["breakeven"] = breakeven
+                            current_stop = get_current_stop(trade, current_price=low, atr_val=trade.get("atr", 0))
+                    break
+
+        if remaining_qty > 0:
+            trade["remaining_qty"] = remaining_qty
+            trade["highest_tp"] = highest_tp_idx
+            trade["breakeven"] = breakeven
+            return trade, closed_parts
+        else:
+            return None, closed_parts
 
     def run(self):
         print(f"Backtesting {len(self.coins)} coins from {self.start.date()} to {self.end.date()}...")
-        for i, current_date_naive in enumerate(self.dates_naive):
-            next_date_naive = self.dates_naive[i+1] if i+1 < len(self.dates_naive) else current_date_naive + timedelta(hours=self.interval_hours)
+        for i, current_date_aware in enumerate(self.dates_aware):
+            current_date_naive = self.dates_naive[i]
+
             new_open = []
             for trade in self.open_trades:
-                updated_trade, closed = self.simulate_trade_life(trade, current_date_naive, next_date_naive)
-                if not closed: new_open.append(updated_trade)
+                df_4h = self.get_4h_klines(trade["symbol"], current_date_aware, days=0.2)
+                if not df_4h.empty:
+                    candle = df_4h.iloc[-1]
+                    if candle.name == current_date_naive:
+                        trade, closed_parts = self.simulate_trade_life_4h(trade, candle)
+                        for cp in closed_parts:
+                            self.closed_trades.append({
+                                "open_time": trade["timestamp"] if trade else None,
+                                "close_time": candle.name.strftime("%Y-%m-%d %H:%M:%S"),
+                                "symbol": trade["symbol"],
+                                "action": trade["action"],
+                                "entry": trade["entry"],
+                                "stop": trade["stop"],
+                                "take_profits": str(trade["take_profits"]),
+                                "exit_price": cp["exit_price"],
+                                "quantity": cp["quantity"],
+                                "pnl": cp["pnl"],
+                                "hit_level": cp["hit_level"]
+                            })
+                        if trade is not None:
+                            new_open.append(trade)
+                else:
+                    new_open.append(trade)
             self.open_trades = new_open
+
             self.equity_curve.append((current_date_naive, self.balance))
-            current_date_aware = self.dates_aware[i]
+
             signal = self.generate_signal_at(current_date_aware)
             if signal is not None:
                 self.open_trades.append(signal)
@@ -1114,8 +1141,52 @@ class BacktestEngine:
     def save_results(self):
         eq_df = pd.DataFrame(self.equity_curve, columns=["date", "balance"])
         eq_df.to_csv("backtest_equity.csv", index=False)
+
+        # Compact trade summary with winrate
         if self.closed_trades:
-            pd.DataFrame(self.closed_trades).to_csv("backtest_trades.csv", index=False)
+            trade_groups = {}
+            for fill in self.closed_trades:
+                key = (fill["open_time"], fill["symbol"])
+                if key not in trade_groups:
+                    trade_groups[key] = {
+                        "symbol": fill["symbol"],
+                        "action": fill["action"],
+                        "entry": fill["entry"],
+                        "stop": fill["stop"],
+                        "open_time": fill["open_time"],
+                        "close_time": fill["close_time"],
+                        "net_pnl": 0.0,
+                        "hit_levels": []
+                    }
+                trade_groups[key]["net_pnl"] += fill["pnl"]
+                trade_groups[key]["hit_levels"].append(fill["hit_level"])
+                if fill["close_time"] > trade_groups[key]["close_time"]:
+                    trade_groups[key]["close_time"] = fill["close_time"]
+
+            compact = []
+            for key, trade in trade_groups.items():
+                compact.append({
+                    "open_time": trade["open_time"],
+                    "close_time": trade["close_time"],
+                    "symbol": trade["symbol"],
+                    "action": trade["action"],
+                    "entry": trade["entry"],
+                    "stop": trade["stop"],
+                    "hit_levels": " → ".join(trade["hit_levels"]),
+                    "net_pnl": round(trade["net_pnl"], 4)
+                })
+            pd.DataFrame(compact).to_csv("backtest_trades.csv", index=False)
+
+            # winrate calculation
+            wins = sum(1 for t in compact if t["net_pnl"] > 0)
+            losses = sum(1 for t in compact if t["net_pnl"] < 0)
+            total_closed = wins + losses
+            winrate = (wins / total_closed * 100) if total_closed > 0 else 0.0
+        else:
+            pd.DataFrame(columns=["open_time","close_time","symbol","action","entry","stop","hit_levels","net_pnl"]).to_csv("backtest_trades.csv", index=False)
+            wins = losses = total_closed = 0
+            winrate = 0.0
+
         total_return = (self.balance - self.initial_balance) / self.initial_balance * 100
         sharpe = None
         if len(eq_df) > 1:
@@ -1128,7 +1199,8 @@ Initial balance: ${self.initial_balance:.2f}
 Final balance:   ${self.balance:.2f}
 Total return: {total_return:.2f}%
 Sharpe ratio: {sharpe:.2f} (approx)
-Number of closed trades: {len(self.closed_trades)}
+Number of closed trades: {total_closed}
+Winrate: {winrate:.1f}% ({wins}W / {losses}L)
 """
         with open("backtest_summary.txt", "w") as f:
             f.write(summary)
