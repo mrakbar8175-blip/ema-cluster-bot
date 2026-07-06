@@ -1,0 +1,32 @@
+name: Daily HN Alpha Hunter
+
+# This dictates WHEN the script runs
+on:
+  schedule:
+    # Runs every day at 8:00 AM and 6:00 PM UTC (Adjust to your timezone)
+    - cron: '0 8,18 * * *'
+  workflow_dispatch: # Allows you to click "Run workflow" manually in GitHub
+
+jobs:
+  scan-and-alert:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository code
+        uses: actions/checkout@v3
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+
+      - name: Run the Hacker News Scanner
+        env:
+          # This securely passes your Discord URL from GitHub Secrets to the script
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: python main.py
