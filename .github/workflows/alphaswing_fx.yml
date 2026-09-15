@@ -1,0 +1,94 @@
+name: AlphaSwing FX v1.0 - Automated 30-Min Cycle
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Manual Override Mode'
+        required: true
+        default: 'full_cycle'
+        type: choice
+        options:
+          - full_cycle
+          - signals_only
+          - monitor_only
+          - add-last-signal
+          - list-trades
+          - remove-trade
+          - ban-pair
+          - unban-pair
+          - list-banned
+          - show-learning
+          - reset-learning
+          - learn-now
+          - report
+      symbol:
+        description: 'Symbol (for remove/ban/unban/add-trade)'
+        required: false
+        default: ''
+      auto_add:
+        description: 'Auto-add signals as trades? (override config)'
+        required: false
+        default: ''
+        type: choice
+        options:
+          - ''
+          - 'true'
+          - 'false'
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      
+      - name: Run AlphaSwing FX Cycle
+        env:
+          FX_WEBHOOK_MAIN: ${{ secrets.FX_WEBHOOK_MAIN }}
+          FX_WEBHOOK_TRADE_UPDATES: ${{ secrets.FX_WEBHOOK_TRADE_UPDATES }}
+          FX_WEBHOOK_WINS_LOSSES: ${{ secrets.FX_WEBHOOK_WINS_LOSSES }}
+          FX_WEBHOOK_PUBLIC: ${{ secrets.FX_WEBHOOK_PUBLIC }}
+          FX_WEBHOOK_VIP: ${{ secrets.FX_WEBHOOK_VIP }}
+          FX_AUTO_ADD_SIGNALS: ${{ github.event.inputs.auto_add }}
+        run: |
+          MODE="${{ github.event.inputs.mode }}"
+          SYMBOL="${{ github.event.inputs.symbol }}"
+          
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            python alphaswing_fx.py --full-cycle
+          elif [ "$MODE" = "full_cycle" ]; then
+            python alphaswing_fx.py --full-cycle
+          elif [ "$MODE" = "signals_only" ]; then
+            python alphaswing_fx.py --signals-only
+          elif [ "$MODE" = "monitor_only" ]; then
+            python alphaswing_fx.py --monitor-only
+          elif [ -n "$SYMBOL" ]; then
+            python alphaswing_fx.py --$MODE "$SYMBOL"
+          else
+            python alphaswing_fx.py --$MODE
+          fi
+      
+      - name: Commit Data Updates
+        if: always()
+        run: |
+          git config user.name "AlphaSwing FX Bot"
+          git config user.email "bot@alphaswing-fx.local"
+          git add *.json *.csv *.txt 2>/dev/null || true
+          git diff --staged --quiet || (git commit -m "📊 FX Data update $(date -u +%H:%M)" && git push)
