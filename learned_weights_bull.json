@@ -1,0 +1,9 @@
+{
+  "momentum": 0.6,
+  "session_momentum": 0.3,
+  "volatility": 0.1,
+  "regime_penalty": -0.3,
+  "updated_at": "never",
+  "based_on_trades": 0,
+  "validation_score": 0.0
+}
