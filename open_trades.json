@@ -22,5 +22,29 @@
     "opened_at": "2026-09-15 14:24:17 UTC",
     "regime": "BULLISH",
     "regime_confidence": 1.0
+  },
+  {
+    "symbol": "NZDUSD=X",
+    "direction": "SHORT",
+    "entry": 0.575662,
+    "stop": 0.57854,
+    "tps": [
+      0.574223,
+      0.572783,
+      0.571344,
+      0.5699059999999999,
+      0.5670279999999999
+    ],
+    "qty": 3474.262783,
+    "atr": 0.0014390000000000236,
+    "score": -1.586,
+    "mom_z": -2.29,
+    "session_mom": -0.08,
+    "notional": 2000.0,
+    "highest_tp_hit": -1,
+    "current_stop": 0.57854,
+    "opened_at": "2026-09-15 23:55:46 UTC",
+    "regime": "BULLISH",
+    "regime_confidence": 1.0
   }
 ]
