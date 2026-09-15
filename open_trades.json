@@ -1,29 +1,5 @@
 [
   {
-    "symbol": "GC=F",
-    "direction": "SHORT",
-    "entry": 4305.251648,
-    "stop": 4335.12309,
-    "tps": [
-      4290.315926,
-      4275.380205,
-      4260.444484,
-      4245.508764000001,
-      4215.637322000001
-    ],
-    "qty": 0.334768,
-    "atr": 14.93572099999983,
-    "score": -2.458,
-    "mom_z": -3.73,
-    "session_mom": -0.3,
-    "notional": 1441.26,
-    "highest_tp_hit": -1,
-    "current_stop": 4335.12309,
-    "opened_at": "2026-09-15 09:09:08 UTC",
-    "regime": "BULLISH",
-    "regime_confidence": 1.0
-  },
-  {
     "symbol": "SI=F",
     "direction": "LONG",
     "entry": 64.042959,
