@@ -1,1 +1,2 @@
 timestamp,symbol,direction,entry,stop,tp1,tp2,tp3,score,mom_z,session_mom,qty,notional,regime,regime_confidence
+2026-09-15 05:49:52 UTC,SI=F,SHORT,63.626799,64.396086,63.242155,62.857512,62.472868,-2.092,-3.61,-0.41,12.999048,827.09,NEUTRAL,0.7

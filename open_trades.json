@@ -1,1 +1,26 @@
-[]
+[
+  {
+    "symbol": "SI=F",
+    "direction": "SHORT",
+    "entry": 63.626799,
+    "stop": 64.396086,
+    "tps": [
+      63.242155,
+      62.857512,
+      62.472868,
+      62.088225,
+      61.318938
+    ],
+    "qty": 12.999048,
+    "atr": 0.38464349999999925,
+    "score": -2.092,
+    "mom_z": -3.61,
+    "session_mom": -0.41,
+    "notional": 827.09,
+    "highest_tp_hit": -1,
+    "current_stop": 64.396086,
+    "opened_at": "2026-09-15 05:49:55 UTC",
+    "regime": "NEUTRAL",
+    "regime_confidence": 0.7
+  }
+]
