@@ -1,1 +1,2 @@
 open_time,close_time,symbol,direction,entry,stop,tp1,tp2,tp3,tp4,tp5,exit_price,qty,pnl_pct,pnl_dollars,r_multiple,hit_level,score,mom_z,session_mom,vol_regime_score,regime,regime_confidence
+2026-09-15 05:49:55 UTC,2026-09-15 14:24:06 UTC,SI=F,SHORT,63.626799,64.396086,63.242155,62.857512,62.472868,62.088225,61.318938,63.626799,12.999048,0.0,0.0,0.0,STOP after TP1,-2.092,-3.61,-0.41,0,NEUTRAL,0.7

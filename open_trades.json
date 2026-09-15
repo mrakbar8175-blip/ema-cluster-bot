@@ -1,29 +1,5 @@
 [
   {
-    "symbol": "SI=F",
-    "direction": "SHORT",
-    "entry": 63.626799,
-    "stop": 64.396086,
-    "tps": [
-      63.242155,
-      62.857512,
-      62.472868,
-      62.088225,
-      61.318938
-    ],
-    "qty": 12.999048,
-    "atr": 0.38464349999999925,
-    "score": -2.092,
-    "mom_z": -3.61,
-    "session_mom": -0.41,
-    "notional": 827.09,
-    "highest_tp_hit": 0,
-    "current_stop": 63.626799,
-    "opened_at": "2026-09-15 05:49:55 UTC",
-    "regime": "NEUTRAL",
-    "regime_confidence": 0.7
-  },
-  {
     "symbol": "GC=F",
     "direction": "SHORT",
     "entry": 4305.251648,
@@ -44,6 +20,30 @@
     "highest_tp_hit": -1,
     "current_stop": 4335.12309,
     "opened_at": "2026-09-15 09:09:08 UTC",
+    "regime": "BULLISH",
+    "regime_confidence": 1.0
+  },
+  {
+    "symbol": "SI=F",
+    "direction": "LONG",
+    "entry": 64.042959,
+    "stop": 63.347959,
+    "tps": [
+      64.39046,
+      64.73796,
+      65.08546,
+      65.43295899999998,
+      66.12795899999998
+    ],
+    "qty": 14.388484,
+    "atr": 0.3474999999999966,
+    "score": 1.914,
+    "mom_z": 3.29,
+    "session_mom": 0.07,
+    "notional": 921.48,
+    "highest_tp_hit": -1,
+    "current_stop": 63.347959,
+    "opened_at": "2026-09-15 14:24:17 UTC",
     "regime": "BULLISH",
     "regime_confidence": 1.0
   }
