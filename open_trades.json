@@ -1,50 +1,26 @@
 [
   {
-    "symbol": "NZDUSD=X",
-    "direction": "SHORT",
-    "entry": 0.575662,
-    "stop": 0.57854,
-    "tps": [
-      0.574223,
-      0.572783,
-      0.571344,
-      0.5699059999999999,
-      0.5670279999999999
-    ],
-    "qty": 3474.262783,
-    "atr": 0.0014390000000000236,
-    "score": -1.586,
-    "mom_z": -2.29,
-    "session_mom": -0.08,
-    "notional": 2000.0,
-    "highest_tp_hit": 2,
-    "current_stop": 0.572783,
-    "opened_at": "2026-09-15 23:55:46 UTC",
-    "regime": "BULLISH",
-    "regime_confidence": 1.0
-  },
-  {
     "symbol": "SI=F",
-    "direction": "LONG",
-    "entry": 66.006981,
-    "stop": 64.936981,
+    "direction": "SHORT",
+    "entry": 66.578271,
+    "stop": 67.348699,
     "tps": [
-      66.541981,
-      67.076981,
-      67.611981,
-      68.14698099999998,
-      69.21698099999998
+      66.193057,
+      65.807842,
+      65.422628,
+      65.03741500000001,
+      64.26698700000001
     ],
-    "qty": 9.345792,
-    "atr": 0.5349999999999966,
-    "score": 1.941,
-    "mom_z": 3.44,
-    "session_mom": -0.4,
-    "notional": 616.89,
-    "highest_tp_hit": 1,
-    "current_stop": 66.541981,
-    "opened_at": "2026-09-17 15:09:14 UTC",
+    "qty": 12.979794,
+    "atr": 0.3852139999999977,
+    "score": -2.235,
+    "mom_z": -3.89,
+    "session_mom": -0.46,
+    "notional": 864.17,
+    "highest_tp_hit": -1,
+    "current_stop": 67.348699,
+    "opened_at": "2026-09-21 10:56:24 UTC",
     "regime": "BULLISH",
-    "regime_confidence": 1.0
+    "regime_confidence": 0.0
   }
 ]
