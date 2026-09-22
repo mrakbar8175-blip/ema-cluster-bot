@@ -17,8 +17,8 @@
     "mom_z": -3.89,
     "session_mom": -0.46,
     "notional": 864.17,
-    "highest_tp_hit": -1,
-    "current_stop": 67.348699,
+    "highest_tp_hit": 0,
+    "current_stop": 66.578271,
     "opened_at": "2026-09-21 10:56:24 UTC",
     "regime": "BULLISH",
     "regime_confidence": 0.0
@@ -41,8 +41,8 @@
     "mom_z": -2.91,
     "session_mom": -0.35,
     "notional": 1335.64,
-    "highest_tp_hit": -1,
-    "current_stop": 4413.68949,
+    "highest_tp_hit": 0,
+    "current_stop": 4380.889545,
     "opened_at": "2026-09-21 20:45:13 UTC",
     "regime": "BULLISH",
     "regime_confidence": 0.0
