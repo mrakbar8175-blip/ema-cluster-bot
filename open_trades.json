@@ -1,26 +1,26 @@
 [
   {
-    "symbol": "GC=F",
-    "direction": "SHORT",
-    "entry": 4380.889545,
-    "stop": 4413.68949,
+    "symbol": "SI=F",
+    "direction": "LONG",
+    "entry": 67.611174,
+    "stop": 66.56546,
     "tps": [
-      4364.489573,
-      4348.089601,
-      4331.689629,
-      4315.2896550000005,
-      4282.489710000001
+      68.134031,
+      68.656888,
+      69.179746,
+      69.70260200000001,
+      70.74831600000002
     ],
-    "qty": 0.304879,
-    "atr": 16.399972499999876,
-    "score": -1.588,
-    "mom_z": -2.91,
-    "session_mom": -0.35,
-    "notional": 1335.64,
-    "highest_tp_hit": 0,
-    "current_stop": 4380.889545,
-    "opened_at": "2026-09-21 20:45:13 UTC",
+    "qty": 9.562842,
+    "atr": 0.5228570000000019,
+    "score": 3.006,
+    "mom_z": 4.5,
+    "session_mom": 1.0,
+    "notional": 646.55,
+    "highest_tp_hit": -1,
+    "current_stop": 66.56546,
+    "opened_at": "2026-09-22 20:48:42 UTC",
     "regime": "BULLISH",
-    "regime_confidence": 0.0
+    "regime_confidence": 1.0
   }
 ]
