@@ -1,29 +1,5 @@
 [
   {
-    "symbol": "SI=F",
-    "direction": "SHORT",
-    "entry": 61.750861,
-    "stop": 62.566721,
-    "tps": [
-      61.342931,
-      60.935001,
-      60.527071,
-      60.119141,
-      59.303281
-    ],
-    "qty": 12.257002,
-    "atr": 0.40793000000000035,
-    "score": -2.164,
-    "mom_z": -4.13,
-    "session_mom": -1.0,
-    "notional": 756.88,
-    "highest_tp_hit": 0,
-    "current_stop": 61.750861,
-    "opened_at": "2026-09-28 07:15:47 UTC",
-    "regime": "BEARISH",
-    "regime_confidence": 1.0
-  },
-  {
     "symbol": "GC=F",
     "direction": "LONG",
     "entry": 4192.202655,
@@ -41,9 +17,33 @@
     "mom_z": 3.8,
     "session_mom": 0.16,
     "notional": 1645.85,
-    "highest_tp_hit": -1,
-    "current_stop": 4166.731254,
+    "highest_tp_hit": 0,
+    "current_stop": 4192.202655,
     "opened_at": "2026-09-29 14:12:32 UTC",
+    "regime": "BEARISH",
+    "regime_confidence": 0.0
+  },
+  {
+    "symbol": "SI=F",
+    "direction": "LONG",
+    "entry": 61.894037,
+    "stop": 61.246179,
+    "tps": [
+      62.217966,
+      62.541894,
+      62.865823,
+      63.189752999999996,
+      63.837610999999995
+    ],
+    "qty": 15.435489,
+    "atr": 0.3239289999999997,
+    "score": 1.931,
+    "mom_z": 3.08,
+    "session_mom": 0.57,
+    "notional": 955.36,
+    "highest_tp_hit": -1,
+    "current_stop": 61.246179,
+    "opened_at": "2026-09-29 23:23:57 UTC",
     "regime": "BEARISH",
     "regime_confidence": 0.0
   }
