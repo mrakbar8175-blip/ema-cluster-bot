@@ -1,29 +1,5 @@
 [
   {
-    "symbol": "GC=F",
-    "direction": "SHORT",
-    "entry": 4305.65175,
-    "stop": 4340.951624,
-    "tps": [
-      4288.001813,
-      4270.351876,
-      4252.701938,
-      4235.052001999999,
-      4199.752127999999
-    ],
-    "qty": 0.283287,
-    "atr": 17.649937000000136,
-    "score": -1.555,
-    "mom_z": -2.28,
-    "session_mom": -0.07,
-    "notional": 1219.74,
-    "highest_tp_hit": 4,
-    "current_stop": 4185.57500315625,
-    "opened_at": "2026-09-25 00:13:59 UTC",
-    "regime": "BULLISH",
-    "regime_confidence": 1.0
-  },
-  {
     "symbol": "SI=F",
     "direction": "SHORT",
     "entry": 61.750861,
@@ -46,5 +22,29 @@
     "opened_at": "2026-09-28 07:15:47 UTC",
     "regime": "BEARISH",
     "regime_confidence": 1.0
+  },
+  {
+    "symbol": "GC=F",
+    "direction": "LONG",
+    "entry": 4192.202655,
+    "stop": 4166.731254,
+    "tps": [
+      4204.938355,
+      4217.674055,
+      4230.409756,
+      4243.145457,
+      4268.616857999999
+    ],
+    "qty": 0.392597,
+    "atr": 12.735700499999894,
+    "score": 2.244,
+    "mom_z": 3.8,
+    "session_mom": 0.16,
+    "notional": 1645.85,
+    "highest_tp_hit": -1,
+    "current_stop": 4166.731254,
+    "opened_at": "2026-09-29 14:12:32 UTC",
+    "regime": "BEARISH",
+    "regime_confidence": 0.0
   }
 ]
