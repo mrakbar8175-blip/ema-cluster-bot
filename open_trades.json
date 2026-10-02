@@ -24,26 +24,26 @@
     "regime_confidence": 1.0
   },
   {
-    "symbol": "SI=F",
-    "direction": "LONG",
-    "entry": 61.644162,
-    "stop": 60.948449,
+    "symbol": "GC=F",
+    "direction": "SHORT",
+    "entry": 4177.788045,
+    "stop": 4222.359544,
     "tps": [
-      61.992018,
-      62.339874,
-      62.68773,
-      63.03558800000001,
-      63.731301000000016
+      4155.502296,
+      4133.216547,
+      4110.930798,
+      4088.645047000001,
+      4044.073548000001
     ],
-    "qty": 14.373754,
-    "atr": 0.34785650000000246,
-    "score": 1.972,
-    "mom_z": 3.29,
-    "session_mom": 0.21,
-    "notional": 886.06,
+    "qty": 0.224359,
+    "atr": 22.285749499999838,
+    "score": -1.502,
+    "mom_z": -2.07,
+    "session_mom": -0.3,
+    "notional": 937.32,
     "highest_tp_hit": -1,
-    "current_stop": 60.948449,
-    "opened_at": "2026-10-02 08:47:45 UTC",
+    "current_stop": 4222.359544,
+    "opened_at": "2026-10-02 15:18:07 UTC",
     "regime": "BULLISH",
     "regime_confidence": 1.0
   }
