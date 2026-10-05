@@ -1,9 +1,15 @@
 {
-  "momentum": 0.6,
-  "session_momentum": 0.3,
-  "volatility": 0.1,
-  "regime_penalty": -0.3,
-  "updated_at": "never",
-  "based_on_trades": 0,
-  "validation_score": 0.0
+  "momentum": 0.463,
+  "session_momentum": 0.183,
+  "volatility": 0.354,
+  "regime_penalty": -0.25,
+  "updated_at": "2026-10-05 09:24 UTC",
+  "based_on_trades": 15,
+  "validation_score": -0.5356,
+  "correlations": {
+    "momentum": -0.127,
+    "session_momentum": -0.714,
+    "volatility": 0
+  },
+  "window_size": 15
 }

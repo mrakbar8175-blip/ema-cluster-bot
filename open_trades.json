@@ -17,8 +17,8 @@
     "mom_z": -2.26,
     "session_mom": -0.63,
     "notional": 2000.0,
-    "highest_tp_hit": 0,
-    "current_stop": 0.934777,
+    "highest_tp_hit": 1,
+    "current_stop": 0.93244,
     "opened_at": "2026-10-02 02:25:06 UTC",
     "regime": "BULLISH",
     "regime_confidence": 1.0
@@ -46,29 +46,5 @@
     "opened_at": "2026-10-02 15:18:07 UTC",
     "regime": "BULLISH",
     "regime_confidence": 1.0
-  },
-  {
-    "symbol": "SI=F",
-    "direction": "SHORT",
-    "entry": 60.740354,
-    "stop": 61.875353,
-    "tps": [
-      60.172854,
-      59.605355,
-      59.037855,
-      58.47035600000002,
-      57.33535700000002
-    ],
-    "qty": 8.810577,
-    "atr": 0.5674994999999967,
-    "score": -1.595,
-    "mom_z": -2.81,
-    "session_mom": -0.43,
-    "notional": 535.16,
-    "highest_tp_hit": -1,
-    "current_stop": 61.875353,
-    "opened_at": "2026-10-02 23:55:39 UTC",
-    "regime": "BULLISH",
-    "regime_confidence": 0.0
   }
 ]
