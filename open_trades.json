@@ -1,29 +1,5 @@
 [
   {
-    "symbol": "EURCHF=X",
-    "direction": "SHORT",
-    "entry": 0.934777,
-    "stop": 0.939451,
-    "tps": [
-      0.93244,
-      0.930103,
-      0.927766,
-      0.9254289999999998,
-      0.9207549999999998
-    ],
-    "qty": 2139.547323,
-    "atr": 0.0023370000000000335,
-    "score": -1.564,
-    "mom_z": -2.26,
-    "session_mom": -0.63,
-    "notional": 2000.0,
-    "highest_tp_hit": 1,
-    "current_stop": 0.93244,
-    "opened_at": "2026-10-02 02:25:06 UTC",
-    "regime": "BULLISH",
-    "regime_confidence": 1.0
-  },
-  {
     "symbol": "GC=F",
     "direction": "SHORT",
     "entry": 4177.788045,
