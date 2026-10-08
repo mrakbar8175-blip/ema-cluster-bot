@@ -1,1 +1,26 @@
-[]
+[
+  {
+    "symbol": "SI=F",
+    "direction": "SHORT",
+    "entry": 59.279625,
+    "stop": 60.051768,
+    "tps": [
+      58.893554,
+      58.507482,
+      58.121411,
+      57.735339,
+      56.963196
+    ],
+    "qty": 12.950974,
+    "atr": 0.3860714999999999,
+    "score": -2.442,
+    "mom_z": -4.81,
+    "session_mom": -0.52,
+    "notional": 767.73,
+    "highest_tp_hit": -1,
+    "current_stop": 60.051768,
+    "opened_at": "2026-10-08 09:18:25 UTC",
+    "regime": "BULLISH",
+    "regime_confidence": 1.0
+  }
+]
