@@ -1,25 +1,25 @@
 [
   {
     "symbol": "SI=F",
-    "direction": "LONG",
-    "entry": 60.714626,
-    "stop": 60.243197,
+    "direction": "SHORT",
+    "entry": 60.565267,
+    "stop": 61.047411,
     "tps": [
-      60.950341,
-      61.186055,
-      61.42177,
-      61.657484000000004,
-      62.128913000000004
+      60.324196,
+      60.083124,
+      59.842052,
+      59.600979,
+      59.118835000000004
     ],
-    "qty": 21.212102,
-    "atr": 0.23571450000000027,
-    "score": 2.162,
-    "mom_z": 3.92,
-    "session_mom": 0.7,
-    "notional": 1287.88,
-    "highest_tp_hit": 1,
-    "current_stop": 60.950341,
-    "opened_at": "2026-10-09 08:24:20 UTC",
+    "qty": 20.740717,
+    "atr": 0.24107199999999906,
+    "score": -1.641,
+    "mom_z": -2.62,
+    "session_mom": -0.1,
+    "notional": 1256.17,
+    "highest_tp_hit": -1,
+    "current_stop": 61.047411,
+    "opened_at": "2026-10-12 18:09:34 UTC",
     "regime": "BEARISH",
     "regime_confidence": 1.0
   }
