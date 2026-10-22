@@ -22,29 +22,5 @@
     "opened_at": "2026-10-13 07:19:06 UTC",
     "regime": "BULLISH",
     "regime_confidence": 1.0
-  },
-  {
-    "symbol": "GC=F",
-    "direction": "LONG",
-    "entry": 4157.42025,
-    "stop": 4126.634536,
-    "tps": [
-      4172.813107,
-      4188.205964,
-      4203.598821,
-      4218.991678000001,
-      4249.777392000002
-    ],
-    "qty": 0.324826,
-    "atr": 15.392857000000276,
-    "score": 1.555,
-    "mom_z": 2.5,
-    "session_mom": 0.05,
-    "notional": 1350.44,
-    "highest_tp_hit": -1,
-    "current_stop": 4126.634536,
-    "opened_at": "2026-10-21 21:10:33 UTC",
-    "regime": "BEARISH",
-    "regime_confidence": 0.0
   }
 ]
