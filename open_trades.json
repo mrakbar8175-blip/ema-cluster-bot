@@ -70,5 +70,29 @@
     "opened_at": "2026-10-28 02:29:33 UTC",
     "regime": "BULLISH",
     "regime_confidence": 1.0
+  },
+  {
+    "symbol": "NZDJPY=X",
+    "direction": "SHORT",
+    "entry": 88.466208,
+    "stop": 88.987635,
+    "tps": [
+      88.205495,
+      87.944781,
+      87.684068,
+      87.42335399999999,
+      86.90192699999999
+    ],
+    "qty": 19.178154,
+    "atr": 0.2607135000000014,
+    "score": -1.513,
+    "mom_z": -2.13,
+    "session_mom": -0.34,
+    "notional": 1696.62,
+    "highest_tp_hit": -1,
+    "current_stop": 88.987635,
+    "opened_at": "2026-10-28 08:55:15 UTC",
+    "regime": "BULLISH",
+    "regime_confidence": 1.0
   }
 ]
