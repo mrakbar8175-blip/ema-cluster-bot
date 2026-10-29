@@ -24,30 +24,6 @@
     "regime_confidence": 1.0
   },
   {
-    "symbol": "AUDCHF=X",
-    "direction": "LONG",
-    "entry": 0.57909,
-    "stop": 0.576195,
-    "tps": [
-      0.580538,
-      0.581986,
-      0.583433,
-      0.58488,
-      0.5877749999999999
-    ],
-    "qty": 3453.692885,
-    "atr": 0.0014474999999999905,
-    "score": 1.529,
-    "mom_z": 2.34,
-    "session_mom": 0.24,
-    "notional": 2000.0,
-    "highest_tp_hit": 2,
-    "current_stop": 0.581986,
-    "opened_at": "2026-10-26 05:43:40 UTC",
-    "regime": "BEARISH",
-    "regime_confidence": 0.0
-  },
-  {
     "symbol": "NZDUSD=X",
     "direction": "SHORT",
     "entry": 0.560881,
