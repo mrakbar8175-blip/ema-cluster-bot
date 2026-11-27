@@ -1,7 +1,7 @@
 {
   "current_regime": "BEARISH",
   "confirmed_at": "2026-11-26 13:29:37 UTC",
-  "candles_in_regime": 4,
-  "last_raw_regime": "BEARISH",
+  "candles_in_regime": 1,
+  "last_raw_regime": "BULLISH",
   "raw_confidence": 1.0
 }
